@@ -1,1 +1,8535 @@
+<script>
+// ─── CONSTANTS ──────────────────────────────────────────────
+// ── Konfigurasi Produk BBM — bisa diubah dari menu Pengaturan ──
+const BBM_DEFAULT=[
+  {id:'pertalite', label:'Pertalite',    tag:'tp', batas:3000, hj:10000, mg:200},
+  {id:'pertamax',  label:'Pertamax',     tag:'tx', batas:2000, hj:13200, mg:300},
+  {id:'dexlite',   label:'Dexlite',      tag:'td', batas:1500, hj:14550, mg:350},
+  {id:'biosolar',  label:'Biosolar',     tag:'tb', batas:3000, hj:6800,  mg:200},
+];
+const BBM_KEY='spbu_bbm_config';
 
+function loadBBMConfig(){
+  try{
+    const saved=localStorage.getItem(BBM_KEY);
+    if(saved) return JSON.parse(saved);
+  }catch(e){}
+  return BBM_DEFAULT;
+}
+function saveBBMConfig(cfg){
+  localStorage.setItem(BBM_KEY,JSON.stringify(cfg));
+  // Update variabel global
+  _rebuildBBMGlobals(cfg);
+  // Sync ke Firebase
+  if(_fbInited) fbSaveAppState().catch(()=>{});
+}
+function _rebuildBBMGlobals(cfg){
+  // Rebuild semua konstanta dari config
+  BBM.length=0;
+  Object.keys(BL).forEach(k=>delete BL[k]);
+  Object.keys(BT).forEach(k=>delete BT[k]);
+  Object.keys(BATAS).forEach(k=>delete BATAS[k]);
+  cfg.filter(p=>p.aktif!==false).forEach(p=>{
+    BBM.push(p.id);
+    BL[p.id]=p.label;
+    BT[p.id]=p.tag||'tp';
+    BATAS[p.id]=p.batas||1000;
+    // Update harga default jika belum ada
+    if(!state.harga[p.id]){
+      state.harga[p.id]=p.hj||10000;
+      state.harga['hpp_'+p.id]=(p.hj||10000)-(p.mg||200);
+    }
+  });
+}
+
+// Variabel global yang bisa di-mutate
+let BBM=['pertalite','pertamax','dexlite','biosolar'];
+const BL={pertalite:'Pertalite',pertamax:'Pertamax',dexlite:'Dexlite',biosolar:'Biosolar'};
+const BT={pertalite:'tp',pertamax:'tx',dexlite:'td',biosolar:'tb'};
+const BATAS={pertalite:3000,pertamax:2000,dexlite:1500,biosolar:3000};
+const HARI=['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
+const SO=['pagi','siang','malam'];
+const SI={pagi:{label:'Shift Pagi',hdr:'sh-p',dot:'dp',time:'06.00–14.00'},siang:{label:'Shift Siang',hdr:'sh-s',dot:'ds',time:'14.00–22.00'},malam:{label:'Shift Malam',hdr:'sh-m',dot:'dm',time:'22.00–06.00'}};
+const DEF={pagi:{pertalite:{awal:0,jual:0,jual2:0,tambah:0},pertamax:{awal:0,jual:0,jual2:0,tambah:0},dexlite:{awal:0,jual:0,jual2:0,tambah:0},biosolar:{awal:0,jual:0,jual2:0,tambah:0}},siang:{pertalite:{jual:0,jual2:0,tambah:0},pertamax:{jual:0,jual2:0,tambah:0},dexlite:{jual:0,jual2:0,tambah:0},biosolar:{jual:0,jual2:0,tambah:0}},malam:{pertalite:{jual:0,jual2:0,tambah:0},pertamax:{jual:0,jual2:0,tambah:0},dexlite:{jual:0,jual2:0,tambah:0},biosolar:{jual:0,jual2:0,tambah:0}}};
+const CATS={gaji:{label:'Gaji/Upah',bg:'#EAF3DE',color:'#2D6A2D'},listrik:{label:'Listrik & Air',bg:'#E6F1FB',color:'#185FA5'},perawatan:{label:'Perawatan',bg:'#FAEEDA',color:'#854F0B'},administrasi:{label:'Administrasi',bg:'#EEEDFE',color:'#534AB7'},lainnya:{label:'Lain-lain',bg:'#F1EFE8',color:'#5F5E5A'}};
+const DB_KEY='spbu_manager_v1';
+const HARGA_KEY='spbu_harga_v1';  // Simpan harga terpisah agar cepat dimuat
+const AUTH_KEY='spbu_auth_session';
+const PWD_KEY='spbu_passwords';
+const PROFIL_KEY='spbu_profil';
+
+// ─── PROFIL PERUSAHAAN ───────────────────────────────────────
+function getProfil(){
+  try{const d=localStorage.getItem(PROFIL_KEY);return d?JSON.parse(d):{nama:'SPBU Saya',noSpbu:'',alamat:'',telp:''};}
+  catch(e){return{nama:'SPBU Saya',noSpbu:'',alamat:'',telp:''};}
+}
+function saveProfil(p){localStorage.setItem(PROFIL_KEY,JSON.stringify(p));}
+function simpanProfil(){
+  const nama=(document.getElementById('profil-nama')||{}).value||'';
+  const noSpbu=(document.getElementById('profil-nospbu')||{}).value||'';
+  const alamat=(document.getElementById('profil-alamat')||{}).value||'';
+  const telp=(document.getElementById('profil-telp')||{}).value||'';
+  if(!nama){toast('⚠ Nama perusahaan tidak boleh kosong!');return;}
+  saveProfil({nama,noSpbu,alamat,telp});
+  // Update topbar brand
+  const brand=document.querySelector('.topbar-brand');
+  if(brand)brand.innerHTML='<span>SPBU</span> '+nama;
+  toast('✓ Profil perusahaan disimpan!');
+}
+const USERS_KEY='spbu_users';
+
+// ─── AUTH SYSTEM ──────────────────────────────────────────────
+let currentUser=null; // {id, role, name, password, menuAccess:[]}
+let loginTab='owner';
+
+// Default menu defs
+const ALL_MENUS=[
+  {id:'dashboard',label:'Dashboard',icon:'🏠'},
+  {id:'input',label:'Input Data',icon:'✚'},
+  {id:'stok',label:'Stok BBM',icon:'⛽'},
+  {id:'laba',label:'Keuntungan',icon:'₿'},
+  {id:'selisih',label:'Losses & Plus',icon:'⚖'},
+  {id:'histori',label:'Histori',icon:'📋'},
+  {id:'laporan',label:'Laporan Harian',icon:'📰'},
+  {id:'penerimaan',label:'Penerimaan BBM',icon:'🚚'},
+  {id:'lapbeli',label:'Laporan Pembelian',icon:'💰'},
+  {id:'forecast',label:'Forecast Stok',icon:'📡'},
+  {id:'stoklaporan',label:'Laporan Stok BBM',icon:'🛢'},
+  {id:'beban',label:'Beban Usaha',icon:'📝'},
+  {id:'labarugi',label:'Laporan Laba Rugi',icon:'📋'},
+  {id:'rekap',label:'Rekap & Laporan',icon:'📊'},
+  {id:'lapkeu',label:'Laporan Keuangan',icon:'📑'},
+  {id:'harga',label:'Harga BBM',icon:'🏷'},
+  {id:'pengaturan',label:'Pengaturan',icon:'⚙'},
+  {id:'database',label:'Database',icon:'💾'},
+];
+const OWNER_DEFAULT_MENUS=ALL_MENUS.map(m=>m.id);
+const MANAGER_DEFAULT_MENUS=['input','stok','laba','selisih','histori','laporan','penerimaan','lapbeli','forecast','stoklaporan','beban','labarugi'];
+
+function getUsers(){
+  try{
+    const d=localStorage.getItem(USERS_KEY);
+    if(!d)return getDefaultUsers();
+    const users=JSON.parse(d);
+    if(!Array.isArray(users)||!users.length)return getDefaultUsers();
+    // MIGRATION: pastikan owner selalu punya akses ke semua menu (termasuk yang baru)
+    let migrated=false;
+    users.forEach(u=>{
+      if(u.role==='owner'){
+        // Owner selalu dapat semua menu terbaru
+        const allIds=ALL_MENUS.map(m=>m.id);
+        const currentMenus=u.menuAccess||[];
+        const missing=allIds.filter(id=>!currentMenus.includes(id));
+        if(missing.length){
+          u.menuAccess=allIds;
+          migrated=true;
+        }
+      }
+    });
+    if(migrated)localStorage.setItem(USERS_KEY,JSON.stringify(users));
+    return users;
+  }catch(e){return getDefaultUsers();}
+}
+function getDefaultUsers(){
+  const pw=getPasswords();
+  return [
+    {id:'owner',role:'owner',name:'Owner',password:pw.owner,menuAccess:OWNER_DEFAULT_MENUS},
+    {id:'manager',role:'manager',name:'Manager',password:pw.manager,menuAccess:MANAGER_DEFAULT_MENUS},
+  ];
+}
+function saveUsers(users){localStorage.setItem(USERS_KEY,JSON.stringify(users));}
+function getUserById(id){return getUsers().find(u=>u.id===id);}
+
+function getPasswords(){
+  try{const d=localStorage.getItem(PWD_KEY);return d?JSON.parse(d):{owner:'owner123',manager:'manager123'};}
+  catch(e){return {owner:'owner123',manager:'manager123'};}
+}
+function savePasswords(pw){localStorage.setItem(PWD_KEY,JSON.stringify(pw));}
+
+function switchLoginTab(tab){
+  loginTab=tab;
+  document.getElementById('tab-owner').classList.toggle('active',tab==='owner');
+  document.getElementById('tab-manager').classList.toggle('active',tab==='manager');
+  document.getElementById('login-btn').className='login-btn '+(tab==='owner'?'':'green');
+  document.getElementById('login-password').value='';
+  document.getElementById('login-error').classList.remove('show');
+  // Tampilkan selector pengguna untuk manager
+  const userField=document.getElementById('login-user-field');
+  const userSelect=document.getElementById('login-user-select');
+  if(tab==='manager'){
+    const users=getUsers().filter(u=>u.role==='manager');
+    userSelect.innerHTML=users.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('');
+    userField.style.display='block';
+  }else{
+    userField.style.display='none';
+  }
+}
+
+function doLogin(){
+  const pwd=document.getElementById('login-password').value;
+  const errEl=document.getElementById('login-error');
+  const users=getUsers();
+  let matched=null;
+  if(loginTab==='owner'){
+    matched=users.find(u=>u.role==='owner'&&u.password===pwd);
+  }else{
+    const selectedId=document.getElementById('login-user-select')?.value;
+    if(selectedId){
+      matched=users.find(u=>u.id===selectedId&&u.password===pwd);
+    }else{
+      matched=users.find(u=>u.role==='manager'&&u.password===pwd);
+    }
+  }
+  if(matched){
+    errEl.classList.remove('show');
+    currentUser={...matched};
+    localStorage.setItem(AUTH_KEY,JSON.stringify(currentUser));
+    showApp();
+  }else{
+    errEl.classList.add('show');
+    errEl.textContent='❌ Password salah. Silakan coba lagi.';
+    document.getElementById('login-password').value='';
+    document.getElementById('login-password').focus();
+  }
+}
+
+function doLogout(){
+  if(!confirm('Keluar dari aplikasi?'))return;
+  localStorage.removeItem(AUTH_KEY);
+  currentUser=null;
+  document.getElementById('login-screen').style.display='flex';
+  document.getElementById('main-topbar').style.display='none';
+  document.getElementById('main-layout').style.display='none';
+  document.getElementById('login-password').value='';
+  switchLoginTab('owner');
+}
+
+function userHasMenu(menuId){
+  if(!currentUser)return false;
+  // Owner selalu punya semua akses
+  if(currentUser.role==='owner'||currentUser.role==='Owner'||
+     currentUser.name==='Owner'||currentUser.id==='owner')return true;
+  return (currentUser.menuAccess||MANAGER_DEFAULT_MENUS).includes(menuId);
+}
+
+function showApp(){
+  document.getElementById('login-screen').style.display='none';
+  document.getElementById('main-topbar').style.display='flex';
+  // Set display flex tapi biarkan CSS media query handle column/row
+  const layoutEl=document.getElementById('main-layout');
+  if(layoutEl)layoutEl.style.display='flex';
+  // Tampilkan backup status di topbar
+  const bsb=document.getElementById('backup-status-bar');
+  if(bsb)bsb.style.display='flex';
+  updateBackupStatus();
+  // Update topbar brand
+  const profil=getProfil();
+  const brandEl=document.querySelector('.topbar-brand');
+  if(brandEl)brandEl.innerHTML='<span>SPBU</span> '+esc(profil.nama||'Manager');
+  const isOwner=currentUser.role==='owner';
+  const badge=document.getElementById('tb-role-badge');
+  badge.textContent=isOwner?'👑 Owner':'🔧 '+currentUser.name;
+  badge.className='role-badge '+(isOwner?'role-owner':'role-manager');
+  const av=document.getElementById('tb-avatar');
+  av.textContent=(currentUser.name||'U').charAt(0).toUpperCase();
+  av.className='user-avatar'+(isOwner?' owner':'');
+  // Build sidebar dynamically
+  buildSidebar();
+  init();
+}
+
+function buildSidebar(){
+  // Robust owner check — cek role DAN apakah punya semua menu
+  const isOwner=!!(currentUser&&(
+    currentUser.role==='owner'||
+    currentUser.role==='Owner'||
+    currentUser.name==='Owner'||
+    currentUser.id==='owner'
+  ));
+  const sidebar=document.getElementById('main-sidebar');
+  if(!sidebar)return;
+  let html='';
+
+  // Dashboard
+  if(isOwner||userHasMenu('dashboard')){
+    html+=`<div class="nav-section">Dashboard</div>
+    <a class="nav-item" onclick="showPage('dashboard')" href="#" id="nav-dashboard">
+      <span class="nav-icon">🏠</span> Dashboard
+    </a><div class="nav-divider"></div>`;
+  }
+
+  // Operasional
+  html+='<div class="nav-section">Operasional</div>';
+  ['input','stok','laba','selisih'].forEach(m=>{
+    const def=ALL_MENUS.find(x=>x.id===m);
+    if(!def)return;
+    if(isOwner||userHasMenu(m))
+      html+=`<a class="nav-item" onclick="showPage('${m}')" href="#" id="nav-${m}"><span class="nav-icon">${def.icon}</span> ${def.label}</a>`;
+  });
+
+  // Data — semua menu data termasuk laporan
+  html+='<div class="nav-divider"></div><div class="nav-section">Data</div>';
+  ['histori','laporan','penerimaan','lapbeli','forecast','stoklaporan','beban','labarugi','rekap','lapkeu','harga','pengaturan'].forEach(m=>{
+    const def=ALL_MENUS.find(x=>x.id===m);
+    if(!def)return;
+    if(isOwner||userHasMenu(m))
+      html+=`<a class="nav-item" onclick="showPage('${m}')" href="#" id="nav-${m}"><span class="nav-icon">${def.icon}</span> ${def.label}</a>`;
+  });
+
+  // Sistem
+  html+='<div class="nav-divider"></div><div class="nav-section">Sistem</div>';
+  html+=`<a class="nav-item" onclick="showPage('database')" href="#" id="nav-database"><span class="nav-icon">💾</span> Database</a>`;
+  if(isOwner)
+    html+=`<a class="nav-item" onclick="showPage('users')" href="#" id="nav-users"><span class="nav-icon">👥</span> Kelola Pengguna</a>`;
+
+  sidebar.innerHTML=html;
+}
+
+const SH_COLOR={pagi:'bk',siang:'bw',malam:'bp'};
+
+let state={sel:{pagi:true,siang:false,malam:false},shiftSaved:{pagi:false,siang:false,malam:false},biayaItems:[],biayaId:1,savedData:[],harga:{pertalite:10000,hpp_pertalite:9800,pertamax:13200,hpp_pertamax:12900,dexlite:14550,hpp_dexlite:14200,biosolar:6800,hpp_biosolar:6600},riwayatHarga:[],draft:{},midShift:{pagi:false,siang:false,malam:false},tambahNormal:{pagi:false,siang:false,malam:false},auditStok:[],bebanUsaha:[],bebanId:1,penerimaan:[],penerimaanId:1};
+let currentPage='input';
+let histChartInst=null;
+
+// ─── LOCALSTORAGE ────────────────────────────────────────────
+function dbSave(){try{localStorage.setItem(DB_KEY,JSON.stringify(state));setTimeout(()=>{try{autoBackupLocal();}catch(e){}},100);}catch(err){toast('⚠ Gagal menyimpan ke database: '+err.message);}}
+function dbLoad(){
+  try{
+    // Muat konfigurasi BBM DULU
+    const bbmCfg=loadBBMConfig();
+    _rebuildBBMGlobals(bbmCfg);
+    // Muat harga dari localStorage terpisah DULU (paling cepat)
+    loadHargaLocal();
+    const d=localStorage.getItem(DB_KEY);
+    if(d){
+      const p=JSON.parse(d);
+      // Deep merge: harga digabung (bukan ditimpa) agar key baru tetap ada
+      const mergedHarga={...state.harga,...(p.harga||{})};
+      state={...state,...p,harga:mergedHarga};
+      // Muat ulang harga terpisah karena state merge bisa override
+      loadHargaLocal();
+      // Migrasi menuAccess: pastikan menu baru ada di semua user
+      const newMenus=['laporan'];
+      if(state.users){
+        state.users=state.users.map(u=>{
+          if(u.role==='owner')return u;
+          const acc=u.menuAccess||[...MANAGER_DEFAULT_MENUS];
+          newMenus.forEach(m=>{if(!acc.includes(m))acc.push(m);});
+          return {...u,menuAccess:acc};
+        });
+      }
+      // Migrasi currentUser di localStorage juga
+      try{
+        const au=localStorage.getItem(AUTH_KEY);
+        if(au){
+          const cu=JSON.parse(au);
+          if(cu&&cu.role!=='owner'&&cu.role!=='Owner'){
+            if(!cu.menuAccess)cu.menuAccess=[...MANAGER_DEFAULT_MENUS];
+            newMenus.forEach(m=>{if(!cu.menuAccess.includes(m))cu.menuAccess.push(m);});
+            localStorage.setItem(AUTH_KEY,JSON.stringify(cu));
+          }
+        }
+      }catch(e){}
+    }
+  }catch(e){toast('⚠ Gagal memuat database');}
+}
+
+// Simpan harga ke localStorage terpisah (instant, tidak tunggu Firebase)
+function saveHargaLocal(){
+  try{localStorage.setItem(HARGA_KEY,JSON.stringify(state.harga));}catch(e){}
+}
+function loadHargaLocal(){
+  try{
+    const h=localStorage.getItem(HARGA_KEY);
+    if(h){const parsed=JSON.parse(h);state.harga={...state.harga,...parsed};}
+  }catch(e){}
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SISTEM LISENSI — SPBU MANAGER
+//  Kontak: 087784786101 untuk aktivasi
+// ═══════════════════════════════════════════════════════════════
+
+const LIC_KEY      = 'spbu_license_v1';
+const LIC_SECRET   = 'SPBU2025@rifki#manager$key!'; // secret key — jangan ubah
+const KONTAK_ORDER = '087784786101';
+
+// ── Hitung hash sederhana (tidak butuh crypto API) ────────────
+function licHash(str){
+  let h=0x811c9dc5;
+  for(let i=0;i<str.length;i++){
+    h^=str.charCodeAt(i);
+    h=(h*0x01000193)>>>0;
+  }
+  // XOR dengan secret
+  let s=0x12345678;
+  for(let i=0;i<LIC_SECRET.length;i++){
+    s^=LIC_SECRET.charCodeAt(i)*(i+1);
+    s=(s*0x9e3779b9)>>>0;
+  }
+  const combined=(h^s)>>>0;
+  return combined.toString(16).toUpperCase().padStart(8,'0');
+}
+
+// ── Generate kode lisensi ─────────────────────────────────────
+// Format: XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX
+function generateLicenseKey(namaSpbu, expDateStr){
+  // expDateStr = 'YYYY-MM-DD' atau 'PERMANENT'
+  const clean=namaSpbu.toUpperCase().trim();
+  const part1=licHash(clean+expDateStr);
+  const part2=licHash(expDateStr+clean+LIC_SECRET);
+  const part3=licHash(part1+clean);
+  const part4=licHash(part2+expDateStr+part1);
+  return part1+'-'+part2+'-'+part3+'-'+part4;
+}
+
+// ── Validasi kode lisensi ─────────────────────────────────────
+function validateLicense(kode, namaSpbu, expDateStr){
+  const expected=generateLicenseKey(namaSpbu,expDateStr);
+  return kode.toUpperCase().trim()===expected;
+}
+
+// ── Simpan dan muat lisensi ───────────────────────────────────
+function saveLicense(data){
+  localStorage.setItem(LIC_KEY,JSON.stringify(data));
+}
+function loadLicense(){
+  try{
+    const d=localStorage.getItem(LIC_KEY);
+    return d?JSON.parse(d):null;
+  }catch(e){return null;}
+}
+
+// ── Cek status lisensi ────────────────────────────────────────
+function checkLicenseStatus(){
+  const lic=loadLicense();
+  if(!lic||!lic.key||!lic.namaSpbu||!lic.expiry) return {valid:false,reason:'not_activated'};
+
+  // Verifikasi kode
+  if(!validateLicense(lic.key,lic.namaSpbu,lic.expiry)){
+    return {valid:false,reason:'invalid_key'};
+  }
+
+  // Cek expired
+  if(lic.expiry!=='PERMANENT'){
+    const exp=new Date(lic.expiry+'T23:59:59');
+    const now=new Date();
+    if(now>exp){
+      const hariLewat=Math.floor((now-exp)/(1000*60*60*24));
+      return {valid:false,reason:'expired',expiry:lic.expiry,hariLewat,namaSpbu:lic.namaSpbu};
+    }
+    // Hitung sisa hari
+    const sisaHari=Math.ceil((exp-now)/(1000*60*60*24));
+    return {valid:true,namaSpbu:lic.namaSpbu,expiry:lic.expiry,sisaHari,tipe:lic.tipe||'bulanan'};
+  }
+
+  return {valid:true,namaSpbu:lic.namaSpbu,expiry:'PERMANENT',sisaHari:9999,tipe:'permanen'};
+}
+
+// ── Tampilkan layar aktivasi ──────────────────────────────────
+function showActivationScreen(reason, extraData){
+  const loginEl=document.getElementById('login-screen');
+  if(loginEl)loginEl.style.display='none';
+
+  let existing=document.getElementById('lic-screen');
+  if(existing)existing.remove();
+
+  const bln=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+  const fTgl=t=>{if(!t||t==='PERMANENT')return'Permanen';const[y,m,d]=t.split('-');return d+' '+bln[parseInt(m)-1]+' '+y;};
+
+  let topContent='';
+  if(reason==='expired'){
+    topContent=`<div style="background:#fee;border:1px solid #f99;border-radius:10px;padding:14px;margin-bottom:20px;text-align:left">
+      <div style="font-weight:700;color:#c00;margin-bottom:4px">⏳ Lisensi Kadaluarsa</div>
+      <div style="font-size:12px;color:#666">SPBU: <strong>${extraData?.namaSpbu||'—'}</strong></div>
+      <div style="font-size:12px;color:#666">Expired: ${fTgl(extraData?.expiry)}</div>
+      <div style="font-size:12px;color:#c00;margin-top:4px">Hubungi kami untuk perpanjangan.</div>
+    </div>`;
+  }else if(reason==='invalid_key'){
+    topContent=`<div style="background:#fee;border:1px solid #f99;border-radius:10px;padding:14px;margin-bottom:20px;text-align:left">
+      <div style="font-weight:700;color:#c00;margin-bottom:4px">❌ Kode Lisensi Tidak Valid</div>
+      <div style="font-size:12px;color:#666">Pastikan nama SPBU dan kode diisi dengan benar.</div>
+    </div>`;
+  }
+
+  const div=document.createElement('div');
+  div.id='lic-screen';
+  div.style.cssText='position:fixed;inset:0;background:linear-gradient(135deg,#1A1916,#2D2B27);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;font-family:system-ui,sans-serif';
+  div.innerHTML=`
+  <div style="background:#fff;border-radius:16px;padding:32px 28px;max-width:440px;width:100%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.4)">
+    <!-- Logo -->
+    <div style="font-size:36px;margin-bottom:8px">⛽</div>
+    <div style="font-size:20px;font-weight:800;color:#1A1916;margin-bottom:4px">SPBU Manager</div>
+    <div style="font-size:12px;color:#888;margin-bottom:20px">Aplikasi Manajemen SPBU Profesional</div>
+
+    ${topContent}
+
+    <!-- Form aktivasi -->
+    <div style="text-align:left;margin-bottom:16px">
+      <label style="font-size:12px;font-weight:700;color:#444;display:block;margin-bottom:6px">NAMA SPBU (sesuai saat order)</label>
+      <input type="text" id="lic-nama" placeholder="cth: SPBU 64.751.14 MATARAM"
+        style="width:100%;padding:10px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:13px;box-sizing:border-box;outline:none;text-transform:uppercase;letter-spacing:.3px"
+        onfocus="this.style.borderColor='#185FA5'" onblur="this.style.borderColor='#ddd'"
+        oninput="document.getElementById('lic-nama-preview').textContent=this.value.toUpperCase().trim()">
+      <div style="margin-top:4px;font-size:11px;color:#888">
+        Akan dicocokkan sebagai: <strong id="lic-nama-preview" style="color:#185FA5;font-family:monospace"></strong>
+      </div>
+    </div>
+    <div style="text-align:left;margin-bottom:20px">
+      <label style="font-size:12px;font-weight:700;color:#444;display:block;margin-bottom:6px">KODE AKTIVASI</label>
+      <input type="text" id="lic-kode" placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX"
+        style="width:100%;padding:10px 12px;border:1.5px solid #ddd;border-radius:8px;font-size:12px;font-family:monospace;letter-spacing:.5px;box-sizing:border-box;text-transform:uppercase;outline:none"
+        onfocus="this.style.borderColor='#185FA5'" onblur="this.style.borderColor='#ddd'"
+        oninput="licFormatInput(this)">
+      <div id="lic-err" style="color:#c00;font-size:11px;margin-top:4px;display:none"></div>
+    </div>
+    <button onclick="activateLicense()"
+      style="width:100%;background:#185FA5;color:#fff;border:none;border-radius:8px;padding:13px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:16px"
+      onmouseover="this.style.background='#1a4a8a'" onmouseout="this.style.background='#185FA5'">
+      🔓 Aktivasi Sekarang
+    </button>
+
+    <!-- Divider -->
+    <div style="border-top:1px solid #eee;padding-top:16px;margin-top:4px">
+      <div style="font-size:12px;color:#888;margin-bottom:10px">Belum punya kode aktivasi?</div>
+      <div style="background:#f8f9fa;border-radius:10px;padding:14px">
+        <div style="font-size:13px;font-weight:700;color:#1A1916;margin-bottom:6px">📱 Hubungi Kami</div>
+        <a href="https://wa.me/62${KONTAK_ORDER.replace(/^0/,'')}" target="_blank"
+          style="display:flex;align-items:center;justify-content:center;gap:8px;background:#25D366;color:#fff;text-decoration:none;border-radius:8px;padding:10px;font-weight:700;font-size:14px">
+          <span style="font-size:18px">💬</span> WhatsApp ${KONTAK_ORDER}
+        </a>
+        <div style="font-size:11px;color:#888;margin-top:8px;line-height:1.6">
+          Sebutkan nama SPBU Anda.<br>Kode aktivasi dikirim setelah konfirmasi.
+        </div>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(div);
+}
+
+// ── Format input kode otomatis ────────────────────────────────
+function licFormatInput(el){
+  let v=el.value.replace(/[^A-Fa-f0-9]/g,'').toUpperCase();
+  let out='';
+  for(let i=0;i<v.length&&i<32;i++){
+    if(i>0&&i%8===0)out+='-';
+    out+=v[i];
+  }
+  el.value=out;
+}
+
+// ── Proses aktivasi ───────────────────────────────────────────
+function activateLicense(){
+  // Normalisasi: uppercase, trim, ganti spasi ganda jadi tunggal
+  const namaRaw=(document.getElementById('lic-nama')?.value||'').trim().replace(/\s+/g,' ');
+  const kode=(document.getElementById('lic-kode')?.value||'').trim().toUpperCase().replace(/[^A-F0-9\-]/g,'');
+  const errEl=document.getElementById('lic-err');
+
+  if(!namaRaw){
+    errEl.textContent='⚠ Nama SPBU wajib diisi!';errEl.style.display='block';return;
+  }
+  if(kode.length<35){
+    errEl.textContent='⚠ Kode aktivasi tidak lengkap!';errEl.style.display='block';return;
+  }
+
+  errEl.style.display='none';
+
+  // Coba validasi untuk berbagai masa berlaku yang mungkin
+  // Format kode: namaSpbu + expiry
+  // Kita perlu decode expiry dari kode — tapi kode adalah hash (one-way)
+  // Solusi: coba semua kemungkinan periode yang wajar
+  const nama=namaRaw.toUpperCase().trim();
+  const today=new Date();
+
+  // Daftar kemungkinan expiry yang akan dicoba
+  const candidates=['PERMANENT'];
+  // Coba 36 bulan ke depan dan 1 bulan ke belakang
+  for(let i=-1;i<=36;i++){
+    const d=new Date(today.getFullYear(),today.getMonth()+i,today.getDate());
+    candidates.push(d.toISOString().slice(0,10));
+    // Juga coba akhir bulan (common expiry)
+    const endOfMonth=new Date(d.getFullYear(),d.getMonth()+1,0);
+    candidates.push(endOfMonth.toISOString().slice(0,10));
+  }
+
+  let foundExpiry=null;
+  for(const exp of candidates){
+    if(validateLicense(kode,nama,exp)){
+      foundExpiry=exp;break;
+    }
+  }
+
+  if(!foundExpiry){
+    errEl.innerHTML='❌ Kode tidak valid.<br>'
+      +'<span style="font-size:10px;color:#888">Nama yang dicek: <strong style="font-family:monospace;color:#185FA5">'+nama+'</strong></span><br>'
+      +'<span style="font-size:10px;color:#888">Pastikan nama SPBU persis sama dengan saat order (sudah otomatis kapital semua).</span>';
+    errEl.style.display='block';
+    return;
+  }
+
+  // Tentukan tipe lisensi
+  const tipe=foundExpiry==='PERMANENT'?'permanen':
+    (new Date(foundExpiry)-today>29*24*60*60*1000)?'bulanan':'trial';
+
+  // Simpan lisensi
+  saveLicense({key:kode,namaSpbu:nama,expiry:foundExpiry,tipe,activatedAt:new Date().toISOString()});
+
+  // Update profil SPBU otomatis
+  const currentProfil=getProfil();
+  saveProfil({...currentProfil,namaSPBU:namaRaw,nama:namaRaw});
+
+  // Tampilkan sukses lalu lanjut ke login
+  const div=document.getElementById('lic-screen');
+  if(div){
+    const bln=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+    const fTgl=t=>{if(t==='PERMANENT')return'Permanen';const[y,m,d]=t.split('-');return d+' '+bln[parseInt(m)-1]+' '+y;};
+    div.innerHTML=`<div style="background:#fff;border-radius:16px;padding:40px 28px;max-width:400px;width:100%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.4)">
+      <div style="font-size:48px;margin-bottom:12px">✅</div>
+      <div style="font-size:20px;font-weight:800;color:#2D6A2D;margin-bottom:8px">Aktivasi Berhasil!</div>
+      <div style="font-size:14px;color:#444;margin-bottom:4px"><strong>${namaRaw}</strong></div>
+      <div style="font-size:13px;color:#888;margin-bottom:20px">Berlaku hingga: <strong>${fTgl(foundExpiry)}</strong> (${tipe})</div>
+      <button onclick="document.getElementById('lic-screen').remove();document.getElementById('login-screen').style.display='flex'"
+        style="background:#185FA5;color:#fff;border:none;border-radius:8px;padding:12px 32px;font-size:14px;font-weight:700;cursor:pointer">
+        Lanjut ke Login →
+      </button>
+    </div>`;
+  }
+}
+
+// ── Banner sisa hari (muncul di topbar saat < 7 hari) ─────────
+function showLicenseWarning(){
+  const status=checkLicenseStatus();
+  if(!status.valid||status.sisaHari>7)return;
+  const bar=document.createElement('div');
+  bar.style.cssText='background:#F5C518;color:#1A1916;text-align:center;padding:6px;font-size:12px;font-weight:700;cursor:pointer';
+  bar.innerHTML='⚠ Lisensi berakhir dalam <strong>'+status.sisaHari+' hari</strong> ('+status.expiry+') — '
+    +'<a href="https://wa.me/62'+KONTAK_ORDER.replace(/^0/,'')+'?text=Perpanjang lisensi SPBU '+encodeURIComponent(status.namaSpbu)+'" target="_blank" style="color:#1A1916;text-decoration:underline">Perpanjang sekarang</a>';
+  document.body.prepend(bar);
+  // Geser topbar ke bawah
+  const topbar=document.getElementById('main-topbar');
+  if(topbar)topbar.style.top='32px';
+  const layout=document.getElementById('main-layout');
+  if(layout)layout.style.marginTop='32px';
+}
+
+// ── Generator Kode (untuk owner/admin — bukan ditampilkan ke user) ──
+function _generateForOwner(namaSpbu, expiry){
+  // Fungsi ini hanya dipanggil dari konsol browser oleh owner
+  const key=generateLicenseKey(namaSpbu.toUpperCase().trim(),expiry);
+  console.log('=== KODE LISENSI ===');
+  console.log('Nama SPBU:', namaSpbu.toUpperCase().trim());
+  console.log('Expiry   :', expiry);
+  console.log('Kode     :', key);
+  console.log('===================');
+  return key;
+}
+
+
+// ─── HELPERS ────────────────────────────────────────────────
+const e=id=>document.getElementById(id);
+const gv=id=>{const el=e(id);if(!el)return 0;return parseFloat((el.value||'').replace(/\./g,'').replace(',','.'))||0};
+const gck=id=>{const el=e(id);return el?el.checked:false};
+const st=(id,v,cls)=>{const el=e(id);if(el){el.textContent=v;if(cls!==undefined)el.className=cls}};
+const fN=v=>Math.round(v).toLocaleString('id');
+const fR=v=>{const s=v<0?'-':'';const a=Math.abs(Math.round(v));if(a>=1e9)return s+'Rp '+(a/1e9).toFixed(2)+' M';if(a>=1e6)return s+'Rp '+(a/1e6).toFixed(1)+' jt';return s+'Rp '+a.toLocaleString('id')};
+const fRF=v=>{const s=v<0?'-':'';return s+'Rp '+Math.abs(Math.round(v)).toLocaleString('id')};
+const gHJ=b=>state.harga[b]||0;
+// Baca nilai jual2: coba dari field alt (mid-sec) dulu, fallback ke inline tabel
+function getJual2(sh,b){
+  const alt=e(`${sh}-jual2-alt-${b}`);
+  if(alt)return parseInt((alt.value||'0').replace(/\./g,''))||0;
+  const inline=e(`${sh}-jual2-${b}`);
+  if(inline)return parseInt((inline.value||'0').replace(/\./g,''))||0;
+  return 0;
+}
+const gHPP=b=>state.harga['hpp_'+b]||0;
+
+// Ambil harga yang berlaku pada tanggal tertentu dari riwayat
+function getHargaPadaTanggal(tanggal,b){
+  if(!state.riwayatHarga||!state.riwayatHarga.length) return {hj:gHJ(b),hpp:gHPP(b)};
+  // Cari riwayat yang berlaku pada tanggal tsb (tanggalBerlaku <= tanggal)
+  const sorted=[...state.riwayatHarga].sort((a,z)=>a.tanggal>z.tanggal?-1:1);
+  const match=sorted.find(r=>r.tanggal<=tanggal);
+  if(!match) return {hj:gHJ(b),hpp:gHPP(b)};
+  return {hj:match.harga[b]||gHJ(b),hpp:match.harga['hpp_'+b]||gHPP(b)};
+}
+
+// Simpan harga saat ini ke riwayat dengan tanggal berlaku
+function simpanRiwayatHarga(tanggalBerlaku,keterangan=''){
+  if(!state.riwayatHarga) state.riwayatHarga=[];
+  const snapshot={...state.harga};
+  // Cek apakah sudah ada riwayat untuk tanggal ini
+  const idx=state.riwayatHarga.findIndex(r=>r.tanggal===tanggalBerlaku);
+  const rec={tanggal:tanggalBerlaku,harga:snapshot,keterangan,savedAt:new Date().toISOString()};
+  if(idx>=0) state.riwayatHarga[idx]=rec;
+  else state.riwayatHarga.unshift(rec);
+  state.riwayatHarga.sort((a,z)=>a.tanggal>z.tanggal?-1:1);
+  saveHargaLocal();
+  dbSave();
+  if(_fbInited) fbSaveAppState().catch(()=>{});
+}
+const cap=s=>s.charAt(0).toUpperCase()+s.slice(1);
+const esc=s=>(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+function toast(msg,dur=2500){const t=e('toast');if(!t)return;t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),dur);}
+
+// ─── LOGIKA STOK ────────────────────────────────────────────
+// ─── RUMUS LOSSES & PLUS ────────────────────────────────────
+// LOSSES = Stok Tercatat − Penjualan Pertama   (tangki habis fisik dicentang)
+//   Contoh: Stok 2.537, jual1 1.016, habis → losses = 2.537-1.016 = 1.521
+//   Jika ada tambah mid-shift + jual2: stok baru = tambah, jual2 dikurangi dari tambah
+//
+// PLUS   = Penjualan − Stok Tercatat   (jual melebihi catatan, otomatis)
+//
+// jual2 = penjualan SETELAH penambahan mid-shift (field terpisah)
+function calcRow(awal,jual,tambah,habis,jual2=0){
+  const selisih=awal-jual;
+  if(habis){
+    // Tangki habis → losses = stok sisa yang tidak bisa dijual
+    const losses=Math.max(0,selisih);
+    // Stok setelah tambah = tambah - jual2 (penjualan dari stok baru)
+    const stokSetelahTambah=Math.max(0,tambah-jual2);
+    const jualTotal=jual+jual2;
+    return{catatan:0,losses,plus:0,jualEfektif:jualTotal,jual2,stokBaru:tambah,stokAkhirEfektif:stokSetelahTambah,isLocked:true,lockType:'losses'};
+  }
+  if(selisih<0){
+    const plus=Math.abs(selisih);
+    const stokSetelahTambah=Math.max(0,tambah-jual2);
+    return{catatan:0,losses:0,plus,jualEfektif:jual+jual2,jual2,stokBaru:tambah,stokAkhirEfektif:stokSetelahTambah,isLocked:true,lockType:'plus'};
+  }
+  // Normal: catatan = sisa + tambah - jual2
+  const catatan=selisih+tambah-jual2;
+  return{catatan:Math.max(0,catatan),losses:0,plus:0,jualEfektif:jual+jual2,jual2,stokBaru:0,stokAkhirEfektif:Math.max(0,catatan),isLocked:false,lockType:'normal'};
+}
+
+// ─── PAGE ROUTER ─────────────────────────────────────────────
+function showPage(name){
+  // Tutup mobile nav saat halaman berubah
+  const _sb=document.getElementById('main-sidebar');
+  const _ov=document.getElementById('mob-overlay');
+  if(_sb)_sb.classList.remove('mob-open');
+  if(_ov)_ov.classList.remove('show');
+  if(!currentUser)return;
+  const isOwner=currentUser.role==='owner';
+  // Proteksi akses
+  if(!isOwner&&name!=='dashboard'){
+    if(!userHasMenu(name)){toast('⚠ Akses terbatas. Hubungi Owner untuk mendapatkan akses.');return;}
+  }
+  if(name==='users'&&!isOwner){toast('⚠ Hanya Owner yang bisa mengelola pengguna.');return;}
+
+  currentPage=name;
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  const activeNav=document.getElementById('nav-'+name);
+  if(activeNav)activeNav.classList.add('active');
+  const main=e('main-content');
+  if(!main)return;
+  if(name==='dashboard')renderDashboardPage(main);
+  else if(name==='input')renderInputPage(main);
+  else if(name==='stok')renderStokPage(main);
+  else if(name==='laba')renderLabaPage(main);
+  else if(name==='selisih')renderSelisihPage(main);
+  else if(name==='histori')renderHistoriPage(main);
+  else if(name==='laporan')renderLaporanPage(main);
+  else if(name==='penerimaan')renderPenerimaanPage(main);
+  else if(name==='lapbeli')renderLapBeliPage(main);
+  else if(name==='forecast')renderForecastPage(main);
+  else if(name==='stoklaporan')renderStokLaporanPage(main);
+  else if(name==='beban')renderBebanPage(main);
+  else if(name==='labarugi')renderLabaRugiPage(main);
+  else if(name==='rekap')renderRekapPage(main);
+  else if(name==='lapkeu')renderLapKeuPage(main);
+  else if(name==='harga')renderHargaPage(main);
+  else if(name==='pengaturan')renderPengaturanPage(main);
+  else if(name==='database')renderDBPage(main);
+  else if(name==='users')renderUsersPage(main);
+}
+
+// ════════════════════════════════════════════════════════════
+// PAGE: DASHBOARD (OWNER ONLY)
+// ════════════════════════════════════════════════════════════
+function renderDashboardPage(main){
+  const data=state.savedData;
+  const now=new Date();
+  const greetText=now.getHours()<12?'Selamat Pagi 🌅':now.getHours()<17?'Selamat Siang ☀️':'Selamat Malam 🌙';
+
+  if(!data.length){
+    main.innerHTML=`
+    <div class="dash-greeting">
+      <h2>${greetText}, Owner!</h2>
+      <p>${now.toLocaleDateString('id-ID',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</p>
+    </div>
+    <div class="card" style="text-align:center;padding:48px">
+      <div style="font-size:48px;margin-bottom:16px">📭</div>
+      <div style="font-size:16px;font-weight:700;margin-bottom:8px">Belum ada data</div>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:20px">Manager belum menginput data penjualan.</div>
+      <button class="btn btn-primary" onclick="showPage('input')">✚ Input Data Sekarang</button>
+    </div>`;
+    return;
+  }
+
+  const today=data[0];
+  const todayDate=today.tanggal;
+  const last7=[...data].slice(0,7);
+  const totalOmzet7=last7.reduce((s,d)=>s+(d.totalOmzet||0),0);
+  const totalLaba7=last7.reduce((s,d)=>s+(d.labaBersih||0),0);
+  const avgLaba7=Math.round(totalLaba7/last7.length);
+  const totalLosses7=last7.reduce((s,d)=>s+(d.tLRp||0),0);
+  const totalVol7=last7.reduce((s,d)=>s+(d.totalJual||0),0);
+  const hariIniLaba=today.labaBersih||0;
+  const hariIniOmzet=today.totalOmzet||0;
+  const hariIniVol=today.totalJual||0;
+  const kemarin=data[1]||null;
+  const trendLaba=kemarin&&kemarin.labaBersih?((hariIniLaba-kemarin.labaBersih)/Math.abs(kemarin.labaBersih)*100):0;
+  const marginPct=hariIniOmzet>0?(hariIniLaba/hariIniOmzet*100):0;
+
+  // Forecast alerts
+  const fcAlerts=getForecastAlerts();
+  const fcAlertHtml=fcAlerts.length?fcAlerts.map(f=>{
+    const isKritis=f.status==='kritis';
+    const col=isKritis?'var(--red)':'var(--amber)';
+    const bg=isKritis?'var(--red-bg)':'var(--amber-bg)';
+    const border=isKritis?'#F7C1C1':'var(--amber-light)';
+    return'<div style="background:'+bg+';border:1px solid '+border+';border-radius:var(--radius);'
+      +'padding:10px 14px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
+      +'<div style="display:flex;align-items:center;gap:10px">'
+      +'<span style="font-size:18px">'+(isKritis?'🚨':'⚠')+'</span>'
+      +'<div>'
+      +'<div style="font-weight:700;font-size:13px;color:'+col+'">'
+      +BL[f.b]+' — '+(isKritis?'KRITIS':'Waspada')+': tersisa '+(f.hariSisa>=999?'sangat lama':Math.floor(f.hariSisa)+' hari')
+      +'</div>'
+      +'<div style="font-size:11px;color:var(--text2)">'
+      +'Stok: '+fN(f.stokSaatIni)+' ltr · ~'+fN(Math.round(f.rataTotal))+' ltr/hari'
+      +(f.perluTerima>0?' · <strong style="color:'+col+'">Pesan min '+fN(Math.ceil(f.perluTerima))+' ltr</strong>':'')
+      +'</div></div></div>'
+      +'<button class="btn btn-sm" onclick="showPage(&quot;forecast&quot;)"'
+      +' style="background:'+col+';color:#fff;border:none;white-space:nowrap;font-size:11px;padding:6px 12px">&#128241; Forecast</button>'
+      +'</div>';
+  }).join(''):'';
+
+  // BBM breakdown
+  const bbmData=BBM.map(b=>{
+    let vol=0,losses=0;
+    today.shifts.forEach(sh=>{const sd=today.shiftData[sh]?.[b]||{};vol+=(sd.jual||0)+(sd.plus||0);losses+=sd.losses||0;});
+    const hSnap=today.hargaSnapshot;
+    const hj=hSnap?hSnap[b]:gHJ(b);
+    const hpp=hSnap?hSnap['hpp_'+b]:gHPP(b);
+    return{b,vol,laba:vol*(hj-hpp),losses,hj};
+  });
+
+  const bbmTiles=bbmData.map(({b,vol,laba,losses})=>`
+    <div class="bbm-tile">
+      <div class="bbm-tile-name"><span class="tag ${BT[b]}">${BL[b]}</span></div>
+      <div class="bbm-tile-vol">${fN(vol)}<span style="font-size:12px;font-weight:400;color:var(--text3)"> ltr</span></div>
+      <div class="bbm-tile-laba" style="color:${laba>=0?'var(--green)':'var(--red)'}">${fRF(laba)}</div>
+      ${losses>0?`<div style="font-size:10px;color:var(--red);margin-top:2px">⚠ ${fN(losses)} ltr losses</div>`:''}
+    </div>`).join('');
+
+  // Riwayat rows
+  const histRows=[...last7].reverse().map((d,i)=>{
+    const isToday=i===last7.length-1;
+    return`<tr style="${isToday?'background:var(--green-bg)':''}">
+      <td>
+        <div style="font-weight:600">${d.tanggal}</div>
+        <div style="font-size:11px;color:var(--text3)">${d.hari||''} ${isToday?'<span style="color:var(--green);font-weight:700">● Hari ini</span>':''}</div>
+      </td>
+      <td>${fN(d.totalJual||0)} ltr</td>
+      <td>${fR(d.totalOmzet||0)}</td>
+      <td style="color:${(d.labaBersih||0)>=0?'var(--green)':'var(--red)'};font-weight:700">${fRF(d.labaBersih||0)}</td>
+      <td style="color:${(d.tLRp||0)>0?'var(--red)':'var(--text3)'};font-size:12px">${(d.tLRp||0)>0?'-'+fRF(d.tLRp):'—'}</td>
+    </tr>`;}).join('');
+
+  main.innerHTML=`
+  ${fcAlertHtml}
+  <!-- GREETING BANNER -->
+  <div class="dash-greeting">
+    <h2>${greetText}, Owner!</h2>
+    <p>${now.toLocaleDateString('id-ID',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</p>
+    <div class="greet-stats" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px">
+      <div class="gs"><span class="gs-label">Data Terakhir</span><span class="gs-val">${todayDate}</span></div>
+      <div class="gs"><span class="gs-label">Total Data</span><span class="gs-val">${data.length} hari</span></div>
+      <div class="gs"><span class="gs-label">Cloud</span><span class="gs-val" style="font-size:13px">${getCloudUrl()?'● Terhubung':'○ Lokal'}</span></div>
+    </div>
+  </div>
+
+  <!-- KPI HARI INI -->
+  <div class="dash-section">Hari Ini — ${todayDate}</div>
+  <div class="dash-kpi">
+    <div class="kpi-card kpi-blue">
+      <span class="kpi-icon">🛢</span>
+      <div class="kpi-label">Volume Terjual</div>
+      <div class="kpi-value kv-blue">${fN(hariIniVol)}</div>
+      <div class="kpi-sub">liter terjual</div>
+    </div>
+    <div class="kpi-card kpi-green">
+      <span class="kpi-icon">💵</span>
+      <div class="kpi-label">Omzet Kotor</div>
+      <div class="kpi-value">${fR(hariIniOmzet)}</div>
+      <div class="kpi-sub">pendapatan bruto</div>
+    </div>
+    <div class="kpi-card ${hariIniLaba>=0?'kpi-green':'kpi-red'}">
+      <span class="kpi-icon">${hariIniLaba>=0?'📈':'📉'}</span>
+      <div class="kpi-label">Laba Bersih</div>
+      <div class="kpi-value ${hariIniLaba>=0?'kv-green':'kv-red'}">${fR(hariIniLaba)}</div>
+      ${kemarin?`<div class="kpi-trend ${trendLaba>=0?'up':'down'}">${trendLaba>=0?'▲':'▼'} ${Math.abs(trendLaba).toFixed(1)}% vs kemarin</div>`:'<div class="kpi-sub">—</div>'}
+    </div>
+    <div class="kpi-card kpi-teal">
+      <span class="kpi-icon">%</span>
+      <div class="kpi-label">Net Margin</div>
+      <div class="kpi-value ${marginPct>=0?'kv-green':'kv-red'}">${marginPct.toFixed(1)}%</div>
+      <div class="kpi-sub">laba / omzet</div>
+    </div>
+    <div class="kpi-card ${(today.tLRp||0)>0?'kpi-red':'kpi-green'}">
+      <span class="kpi-icon">${(today.tLRp||0)>0?'⚠️':'✅'}</span>
+      <div class="kpi-label">Losses</div>
+      <div class="kpi-value ${(today.tLRp||0)>0?'kv-red':''}">${(today.tLRp||0)>0?'-'+fRF(today.tLRp):'Nihil'}</div>
+      <div class="kpi-sub">${(today.tLRp||0)>0?'perlu perhatian':'semua normal'}</div>
+    </div>
+    <div class="kpi-card kpi-amber">
+      <span class="kpi-icon">🔄</span>
+      <div class="kpi-label">Shift Hari Ini</div>
+      <div class="kpi-value">${today.shifts.length}</div>
+      <div class="kpi-sub">${today.shifts.map(s=>s.charAt(0).toUpperCase()+s.slice(1)).join(' + ')}</div>
+    </div>
+  </div>
+
+  <!-- BBM BREAKDOWN -->
+  <div class="dash-section">Penjualan per BBM — Hari Ini</div>
+  <div class="bbm-grid">${bbmTiles}</div>
+
+  <!-- KPI 7 HARI -->
+  <div class="dash-section">7 Hari Terakhir</div>
+  <div class="dash-kpi">
+    <div class="kpi-card kpi-blue">
+      <span class="kpi-icon">📦</span>
+      <div class="kpi-label">Total Volume</div>
+      <div class="kpi-value">${fN(totalVol7)}</div>
+      <div class="kpi-sub">liter</div>
+    </div>
+    <div class="kpi-card kpi-green">
+      <span class="kpi-icon">💰</span>
+      <div class="kpi-label">Total Omzet</div>
+      <div class="kpi-value">${fR(totalOmzet7)}</div>
+    </div>
+    <div class="kpi-card ${totalLaba7>=0?'kpi-green':'kpi-red'}">
+      <span class="kpi-icon">💹</span>
+      <div class="kpi-label">Total Laba</div>
+      <div class="kpi-value ${totalLaba7>=0?'kv-green':'kv-red'}">${fR(totalLaba7)}</div>
+    </div>
+    <div class="kpi-card kpi-amber">
+      <span class="kpi-icon">📊</span>
+      <div class="kpi-label">Rata-rata/Hari</div>
+      <div class="kpi-value ${avgLaba7>=0?'kv-green':'kv-red'}">${fR(avgLaba7)}</div>
+    </div>
+    <div class="kpi-card ${totalLosses7>0?'kpi-red':'kpi-green'}">
+      <span class="kpi-icon">🔒</span>
+      <div class="kpi-label">Total Losses</div>
+      <div class="kpi-value ${totalLosses7>0?'kv-red':''}">${totalLosses7>0?'-'+fRF(totalLosses7):'Nihil'}</div>
+    </div>
+    <div class="kpi-card kpi-purple">
+      <span class="kpi-icon">📆</span>
+      <div class="kpi-label">Hari Tercatat</div>
+      <div class="kpi-value">${data.length}</div>
+      <div class="kpi-sub">total data</div>
+    </div>
+  </div>
+
+  <!-- RIWAYAT + AKSI -->
+  <div style="display:grid;grid-template-columns:1fr 280px;gap:16px;align-items:start">
+    <div class="card" style="margin-bottom:0">
+      <div class="card-title">📋 Riwayat 7 Hari
+        <button class="btn btn-ghost btn-sm" onclick="showPage('rekap')">Rekap Lengkap →</button>
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th style="text-align:left">Tanggal</th>
+          <th>Volume</th>
+          <th>Omzet</th>
+          <th>Laba Bersih</th>
+          <th style="color:var(--red)">Losses</th>
+        </tr></thead>
+        <tbody>${histRows}</tbody>
+      </table></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <!-- Widget Produk Masuk Hari Ini -->
+      ${(()=>{
+        const penHariIni=(state.penerimaan||[]).filter(p=>p.tanggal===todayDate);
+        if(!penHariIni.length)return'<div style="background:var(--surface2);border-radius:var(--radius);padding:10px 12px;margin-bottom:2px;font-size:12px;color:var(--text3)">📥 Tidak ada produk masuk hari ini</div>';
+        let totalNilaiH=0;
+        const bbmMasuk={};BBM.forEach(b=>bbmMasuk[b]=0);
+        penHariIni.forEach(p=>{BBM.forEach(b=>{bbmMasuk[b]+=(p.detail?.[b]?.volume||0);totalNilaiH+=(p.detail?.[b]?.nilai||0);});});
+        return'<div style="background:var(--blue-bg);border:1px solid var(--blue-light);border-radius:var(--radius);padding:10px 12px;margin-bottom:2px;cursor:pointer" onclick="showPage(&quot;lapbeli&quot;)">'
+          +'<div style="font-size:11px;font-weight:700;color:var(--blue);margin-bottom:6px">📥 Produk Masuk Hari Ini</div>'
+          +'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">'
+          +BBM.filter(b=>bbmMasuk[b]>0).map(b=>'<span class="tag '+BT[b]+'" style="font-size:10px">'+BL[b]+' '+fN(bbmMasuk[b])+'ltr</span>').join('')
+          +'</div>'
+          +'<div style="font-size:11px;font-weight:700;color:var(--red)">Modal: '+fRF(totalNilaiH)+'</div>'
+          +'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+penHariIni.length+' DO masuk → klik detail</div>'
+          +'</div>';
+      })()}
+      <div style="font-size:13px;font-weight:700;color:var(--text);padding:0 2px;text-transform:uppercase;letter-spacing:.06em">Aksi Cepat</div>
+      <a onclick="showPage('rekap')" href="#" class="qa-card"><span class="qa-icon">📊</span><div class="qa-label">Rekap & Laporan</div></a>
+      <a onclick="showPage('histori')" href="#" class="qa-card"><span class="qa-icon">📋</span><div class="qa-label">Histori Data</div></a>
+      <a onclick="showPage('harga')" href="#" class="qa-card"><span class="qa-icon">🏷</span><div class="qa-label">Kelola Harga BBM</div></a>
+      <a onclick="showPage('database')" href="#" class="qa-card"><span class="qa-icon">☁</span><div class="qa-label">Cloud & Database</div></a>
+    </div>
+  </div>`;
+}
+function renderInputPage(main){
+  main.innerHTML=`
+  <div class="page-header">
+    <div class="page-title">Input Data Harian</div>
+    <div class="page-sub">Catat penjualan, stok, dan penambahan BBM per shift</div>
+  </div>
+  <div class="formula-box">
+    <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--red);font-weight:700">▲ Losses</span><span class="feq">Stok Tercatat − Penjualan</span><span style="font-size:11px;color:var(--text2)">(tangki habis fisik)</span></div>
+    <span style="color:var(--border2)">|</span>
+    <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--purple);font-weight:700">↑ Plus</span><span class="feq">Jual − Awal</span></div>
+    <span style="color:var(--border2)">|</span>
+    <span style="font-size:11px;color:var(--text2)">Penambahan mid-shift langsung masuk stok berjalan</span>
+  </div>
+  <div class="card">
+    <div class="card-title">Informasi Hari</div>
+    <div class="form-row cols-2">
+      <div class="fg"><label>Tanggal</label><input type="date" class="inp" id="f-tanggal" onchange="onTgl()"></div>
+      <div class="fg"><label>Hari</label><input type="text" class="inp" id="f-hari" readonly></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Pilih Shift</div>
+    <div class="g3" style="gap:12px">
+      ${SO.map(sh=>`
+      <div onclick="tgSh('${sh}')" style="border:2px solid ${state.sel[sh]?'var(--'+{pagi:'green',siang:'amber',malam:'purple'}[sh]+')':'var(--border)'};background:${state.sel[sh]?'var(--'+{pagi:'green',siang:'amber',malam:'purple'}[sh]+'-bg)':'var(--surface)'};border-radius:var(--radius);padding:14px;cursor:pointer;user-select:none;position:relative;transition:all .15s" id="sc-${sh}">
+        <div style="position:absolute;top:8px;right:8px;width:16px;height:16px;border-radius:50%;background:${state.sel[sh]?'var(--'+{pagi:'green',siang:'amber',malam:'purple'}[sh]+')':'var(--border)'};display:flex;align-items:center;justify-content:center;font-size:9px;color:${state.sel[sh]?'#fff':'transparent'}">✓</div>
+        <div style="font-size:16px;margin-bottom:4px">${{pagi:'☀',siang:'⛅',malam:'☾'}[sh]}</div>
+        <div style="font-size:13px;font-weight:700">${SI[sh].label}</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:2px">${SI[sh].time}</div>
+      </div>`).join('')}
+    </div>
+  </div>
+  <div id="form-shifts"></div>
+  <div id="form-biaya" class="card" style="display:none">
+    <div class="card-title">Biaya Operasional Harian</div>
+    <div class="biaya-add">
+      <div class="fg fg-ket"><label>Keterangan</label><input type="text" class="inp" id="b-ket" placeholder="cth: Gaji kasir shift pagi"></div>
+      <div class="fg fg-cat"><label>Kategori</label><select class="inp" id="b-cat">${Object.entries(CATS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select></div>
+      <div class="fg fg-nom"><label>Nominal (Rp)</label><input type="text" class="inp inp-num" id="b-nom" placeholder="0" oninput="fmtB(this)"></div>
+      <button class="btn btn-primary btn-sm" onclick="addBiaya()" style="align-self:flex-end">+ Tambah</button>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>#</th><th>Keterangan</th><th>Kategori</th><th>Nominal</th><th></th></tr></thead>
+      <tbody id="biaya-tbody"></tbody>
+    </table></div>
+    <div id="biaya-cat-rows" style="margin-top:8px"></div>
+    <div class="rrow tot"><span>Total Biaya Operasional</span><span class="rv" id="biaya-total" style="font-size:16px">Rp 0</span></div>
+  </div>
+  <div id="form-preview" style="display:none"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+    <button class="btn btn-reset" onclick="confirmResetAll()">↺ Reset Semua</button>
+    <button class="btn btn-ghost" onclick="showPreview()">Pratinjau</button>
+    <button class="btn btn-save" onclick="showPreview(true)">Pratinjau & Simpan</button>
+  </div>`;
+
+  // Set today
+  const today=new Date();
+  const y=today.getFullYear(),m=String(today.getMonth()+1).padStart(2,'0'),d=String(today.getDate()).padStart(2,'0');
+  if(e('f-tanggal')&&!e('f-tanggal').value)e('f-tanggal').value=`${y}-${m}-${d}`;
+  onTgl();
+  renderShifts();calcAll();
+  renderBiaya();
+}
+
+function tgSh(sh){
+  if(state.shiftSaved[sh]){toast('Shift '+cap(sh)+' sudah disimpan. Klik Edit untuk mengubah.');return;}
+  state.sel[sh]=!state.sel[sh];
+  const card=e('sc-'+sh);
+  if(card)renderInputPage(e('main-content'));
+  else renderShifts();
+}
+
+function renderShifts(){
+  const active=SO.filter(s=>state.sel[s]);
+  const wrap=e('form-shifts');if(!wrap)return;
+  wrap.innerHTML=active.map((sh,idx)=>{
+    const prev=idx>0?active[idx-1]:null;
+    const isPagi=sh==='pagi';
+    const si=SI[sh];
+    const def=DEF[sh];
+    const saved=state.shiftSaved[sh];
+    const stateBtn=saved
+      ?`<span class="state-badge sb-saved">✓ Tersimpan</span><button class="btn btn-edit btn-sm" onclick="editShift('${sh}')">✎ Edit</button><button class="btn btn-reset btn-sm" onclick="confirmResetShift('${sh}')">↺ Reset</button>`
+      :`<span class="state-badge sb-edit">✎ Mengedit</span><button class="btn btn-save btn-sm" onclick="saveShift('${sh}')">✓ Simpan Shift</button><button class="btn btn-reset btn-sm" onclick="confirmResetShift('${sh}')">↺ Reset</button>`;
+    const rows=BBM.map(b=>{
+      const d=(!isPagi&&prev&&state.draft?.[sh]?.[b])?state.draft[sh][b]:(isPagi&&state.draft?.pagi?.[b])?state.draft.pagi[b]:(def[b]||{});
+      const tgl=e('f-tanggal')?.value||'';
+      // Shift Pagi: SELALU cek histori hari sebelumnya (lintas bulan/tahun)
+      const prevDayVal=isPagi?getPrevDayStock(tgl,b):null;
+      const isAwalAuto=isPagi&&prevDayVal!==null;
+      // Hitung stok awal otomatis dari stok akhir efektif shift sebelumnya (dalam hari)
+      let prevShiftVal=0;
+      if(!isPagi&&prev){
+        const pAwal=parseInt((e(`${prev}-awal-${b}`)?.value||'0').replace(/[^0-9]/g,''))||0;
+        const pJulEl=e(`${prev}-jual-${b}`);
+        const pHabis=e(`${prev}-habis-${b}`)?.checked||false;
+        const pJual=pHabis&&pJulEl?.dataset?.jualAsli?parseInt((pJulEl.dataset.jualAsli||'0').replace(/[^0-9]/g,''))||0:parseInt((pJulEl?.value||'0').replace(/[^0-9]/g,''))||0;
+        // Mid-shift: stok masuk ke shift prev
+        const pTambahMid=state.midShift&&state.midShift[prev]?parseInt((e(`${prev}-tambah-${b}`)?.value||'0').replace(/[^0-9]/g,''))||0:0;
+        // Tambah Normal: stok dari shift prev masuk ke shift ini (sh)
+        const pTambahNormal=state.tambahNormal&&state.tambahNormal[prev]?parseInt((e(`${prev}-tambah-normal-${b}`)?.value||'0').replace(/[^0-9]/g,''))||0:0;
+        const pJual2=getJual2(prev,b);
+        const pR=calcRow(pAwal,pJual,pTambahMid,pHabis,pJual2);
+        prevShiftVal=Math.max(0,pR.stokAkhirEfektif+pTambahNormal);
+      }
+      const awalVal=isAwalAuto?prevDayVal:(!isPagi&&prev?prevShiftVal:(d.awal||0));
+      const isAuto=(!isPagi&&prev)||isAwalAuto;
+      const lock=saved;
+      const awalStyle=(isAuto||lock)?'inp inp-num inp-auto':'inp inp-num';
+      const jualStyle=lock?'inp inp-num':'inp inp-num';
+      return`<tr id="tr-${sh}-${b}">
+        <td><span class="tag ${BT[b]}">${BL[b]}</span></td>
+        <td>
+          <input type="text" id="${sh}-awal-${b}" value="${fN(awalVal)}" class="${awalStyle}" ${isAuto||lock?'readonly':''} oninput="onFC('${sh}','${b}')" style="width:90px">
+          ${isAwalAuto?`<div id="${sh}-awal-info-${b}" style="font-size:10px;color:var(--blue);margin-top:2px;white-space:nowrap">↑ dari ${getPrevDayTanggal(tgl)||'data sebelumnya'}: ${fN(prevDayVal)} ltr</div>`:''}
+          ${isAuto&&!isAwalAuto?`<div id="${sh}-awal-info-${b}" style="font-size:10px;color:${prevShiftVal>0?'var(--blue)':'var(--red)'};margin-top:2px;white-space:nowrap">↑ stok akhir ${prev?cap(prev):''}: ${fN(prevShiftVal)} ltr</div>`:''}
+          ${isPagi&&!isAwalAuto&&!isAuto?`<div style="font-size:10px;color:var(--amber);margin-top:2px;white-space:nowrap">✏ Stok pembuka — input manual</div>`:''}
+        </td>
+        <td>
+          <input type="text" id="${sh}-jual-${b}" value="${d.jual||0}" class="${jualStyle}" ${lock?'readonly':''} oninput="onFC('${sh}','${b}')" style="width:90px">
+        </td>
+        <td>
+          <input type="text" id="${sh}-jual2-${b}" value="${d.jual2||0}" class="inp inp-num" ${lock?'readonly':''} oninput="onFC('${sh}','${b}')" style="width:90px;display:none" placeholder="0">
+        </td>
+        <td id="${sh}-catatan-cell-${b}">—</td>
+        <td id="${sh}-sel-cell-${b}" style="font-size:11px;min-width:120px">—</td>
+        <td style="text-align:center">
+          <label style="display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;font-size:12px${lock?';opacity:.5;pointer-events:none':''}">
+            <input type="checkbox" id="${sh}-habis-${b}" ${(d.habis&&!lock)?'checked':''} ${lock?'disabled':''} onchange="onHabis('${sh}','${b}')" style="width:14px;height:14px;accent-color:var(--red)">
+            <span style="color:var(--red);font-weight:600;font-size:11px">Habis</span>
+          </label>
+        </td>
+        <td id="${sh}-status-${b}" style="font-size:11px;text-align:right"></td>
+      </tr>`;
+    }).join('');
+    const nextShift=idx<active.length-1?active[idx+1]:null;
+    const tambahGrid=BBM.map(b=>{
+      const tv=isPagi?(def[b]?.tambah||0):0;
+      return`<div class="fg">
+        <label><span class="tag ${BT[b]}" style="font-size:10px">${BL[b]}</span></label>
+        <input type="text" id="${sh}-tambah-${b}" value="${tv}" class="inp inp-tambah inp-num" ${saved?'readonly':''} oninput="onTambahChange('${sh}','${b}')" style="${saved?'opacity:.6':''}">
+        <div id="${sh}-stk-cur-${b}" class="cur-stk"></div>
+      </div>`;
+    }).join('');
+    // Grid input Jual 2 — penjualan dari stok tambah mid-shift
+    const jual2Grid=BBM.map(b=>{
+      const j2v=(state.draft&&state.draft[sh]&&state.draft[sh][b])?state.draft[sh][b].jual2||0:0;
+      return`<div class="fg">
+        <label><span class="tag ${BT[b]}" style="font-size:10px">${BL[b]}</span></label>
+        <input type="text" id="${sh}-jual2-alt-${b}" value="${j2v}" class="inp inp-num inp-tambah" ${saved?'readonly':''} oninput="onJual2Change('${sh}','${b}')" style="${saved?'opacity:.6':''}">
+        <div id="${sh}-j2cur-${b}" class="cur-stk"></div>
+      </div>`;
+    }).join('');
+    // Grid input Tambah Normal — stok untuk shift berikutnya
+    const tambahNormalGrid=BBM.map(b=>{
+      const tnv=(state.draft&&state.draft[sh]&&state.draft[sh][b])?state.draft[sh][b].tambahNormal||0:0;
+      return`<div class="fg">
+        <label><span class="tag ${BT[b]}" style="font-size:10px">${BL[b]}</span></label>
+        <input type="text" id="${sh}-tambah-normal-${b}" value="${tnv}" class="inp inp-num inp-tambah" ${saved?'readonly':''} oninput="onTambahNormalChange('${sh}','${b}')" style="background:var(--amber-bg);border-color:var(--amber-light);${saved?'opacity:.6':''}">
+        <div id="${sh}-tn-info-${b}" class="cur-stk"></div>
+      </div>`;
+    }).join('');
+    const tambahTargetSel=nextShift&&!saved?`
+      <div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.05em">Masuk ke:</span>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;font-weight:500">
+          <input type="radio" name="${sh}-tambah-target" id="${sh}-target-current" value="current" checked onchange="onTambahTargetChange('${sh}')">
+          <span style="display:flex;align-items:center;gap:4px">
+            <span class="bx ${SH_COLOR[sh]||'bk'}" style="font-size:10px">Shift ${cap(sh)} (sekarang)</span>
+          </span>
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;font-weight:500">
+          <input type="radio" name="${sh}-tambah-target" id="${sh}-target-next" value="next" onchange="onTambahTargetChange('${sh}')">
+          <span style="display:flex;align-items:center;gap:4px">
+            <span class="bx ${SH_COLOR[nextShift]||'bk'}" style="font-size:10px">Shift ${cap(nextShift)} (berikutnya)</span>
+          </span>
+        </label>
+        <span id="${sh}-tambah-target-info" style="font-size:11px;color:var(--text3)"></span>
+      </div>`:'';
+    const tambahNote=nextShift?'':`<div style="font-size:11px;color:var(--text3);margin-top:6px">ℹ Tidak ada shift berikutnya — penambahan masuk ke stok shift ini.</div>`;
+    const tglVal=e('f-tanggal')?.value||'';
+    let autoNote='';
+    if(prev){
+      autoNote=`<div class="nt nt-i" style="margin-bottom:12px;font-size:12px">🔗 Stok awal = stok akhir efektif Shift ${cap(prev)} — otomatis terhubung dan selalu terbarui.</div>`;
+    } else if(isPagi){
+      // Selalu cek histori — lintas bulan & tahun, ambil data terakhir yang ada
+      const adaKemarin=BBM.some(b=>getPrevDayStock(tglVal,b)!==null);
+      if(adaKemarin){
+        const prevTglStr=getPrevDayTanggal(tglVal)||'';
+        autoNote=`<div class="nt nt-s" style="margin-bottom:12px;font-size:12px">🔗 Stok awal otomatis dari data terakhir (${prevTglStr}) — rantai stok berkelanjutan. Tidak perlu input manual.</div>`;
+      } else {
+        autoNote=`<div class="nt nt-w" style="margin-bottom:12px;font-size:12px">⚠ Belum ada data sebelumnya. Isi stok awal secara manual sebagai stok pembuka pertama kali.</div>`;
+      }
+    }
+    return`<div class="shift-block">
+      <div class="shift-hdr ${si.hdr}">
+        <div class="shift-name"><span class="shift-dot ${si.dot}"></span>${si.label} <span class="shift-time">${si.time}</span></div>
+        <div class="shift-actions">${stateBtn}</div>
+      </div>
+      <div class="shift-content">
+        ${autoNote}
+        <div class="tbl-wrap"><table class="stbl">
+          <thead><tr>
+            <th style="text-align:left;min-width:80px">BBM</th>
+            <th>${prev?'Dari '+cap(prev):(isPagi&&BBM.some(b=>getPrevDayStock(tglVal,b)!==null)?'Dari Kemarin':'Stok Awal')}</th>
+            <th>Jual 1 (ltr)</th>
+            <th id="${sh}-th-jual2" style="display:none;min-width:80px">Jual 2 (ltr)<br><small style="font-weight:400;color:var(--green)">stok tambah</small></th>
+            <th>Stok Catatan Akhir</th>
+            <th>Losses / Plus</th>
+            <th style="text-align:center">Tangki Habis?</th>
+            <th>Status</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+        <div class="tambah-sec" style="margin-top:14px">
+          <div style="padding:12px 14px;background:var(--green-bg);border:1px solid var(--green-light);border-radius:var(--radius);margin-bottom:8px">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none${saved?";opacity:.5;pointer-events:none":""}">
+              <input type="checkbox" id="${sh}-midshift-chk"
+                ${(state.midShift&&state.midShift[sh])?"checked":""} ${saved?"disabled":""}
+                onchange="toggleMidShift('${sh}')" style="width:16px;height:16px;accent-color:var(--green)">
+              <div style="flex:1">
+                <div style="font-size:13px;font-weight:700;color:var(--green)">⚡ Penambahan Stok Mid-Shift</div>
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">Stok masuk di tengah shift berjalan — tercatat langsung di shift <strong>${cap(sh)}</strong></div>
+              </div>
+            </label>
+            <div id="${sh}-mid-sec" style="display:${(state.midShift&&state.midShift[sh])?"block":"none"};margin-top:12px;padding-top:12px;border-top:1px solid var(--green-light)">
+              <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Volume Masuk (ltr)</div>
+              <div class="form-row cols-4">${tambahGrid}</div>
+              <div id="${sh}-jual2-section" style="display:none;margin-top:12px;padding:10px 12px;background:#fff;border:1px solid var(--green-light);border-radius:var(--radius)">
+                <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:8px;display:flex;align-items:center;gap:8px">
+                  <span>📦 Penjualan Setelah Stok Masuk</span>
+                  <span style="background:var(--green);color:#fff;padding:1px 8px;border-radius:20px;font-size:10px">JUAL 2</span>
+                </div>
+                <div class="form-row cols-4">${jual2Grid}</div>
+              </div>
+            </div>
+          </div>
+          ${nextShift?`
+          <div style="margin-top:8px;padding:12px 14px;background:var(--amber-bg);border:1px solid var(--amber-light);border-radius:var(--radius)">
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none${saved?';opacity:.5;pointer-events:none':''}">
+              <input type="checkbox" id="${sh}-normal-chk"
+                ${(state.tambahNormal&&state.tambahNormal[sh])?"checked":""} ${saved?"disabled":""}
+                onchange="toggleTambahNormal('${sh}')" style="width:16px;height:16px;accent-color:var(--amber)">
+              <div style="flex:1">
+                <div style="font-size:13px;font-weight:700;color:var(--amber)">📦 Penambahan Stok Normal</div>
+                <div style="font-size:11px;color:var(--text2);margin-top:2px">Stok disiapkan untuk shift berikutnya — masuk ke <strong>Stok Awal Shift ${cap(nextShift)}</strong></div>
+              </div>
+            </label>
+            <div id="${sh}-normal-sec" style="display:${(state.tambahNormal&&state.tambahNormal[sh])?"block":"none"};margin-top:12px;padding-top:12px;border-top:1px solid var(--amber-light)">
+              <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Volume untuk Shift ${cap(nextShift)} (ltr)</div>
+              <div class="form-row cols-4">${tambahNormalGrid}</div>
+            </div>
+          </div>`:''}
+        </div>
+        <div id="notice-${sh}" style="margin-top:12px"></div>
+      </div>
+    </div>
+    ${idx<active.length-1?`<div class="flow-arrow">↓ Stok akhir efektif ${cap(sh)} → Stok awal ${cap(active[idx+1])}</div>`:''}`;
+  }).join('');
+  if(e('form-biaya'))e('form-biaya').style.display=active.length>0?'block':'none';
+  // Panggil calcAll langsung (DOM sudah siap karena innerHTML sudah diset di atas)
+  // Gunakan timeout kecil hanya sebagai fallback jika ada rendering delay
+  calcAll();
+  setTimeout(()=>calcAll(),50);
+}
+
+function saveShift(sh){state.shiftSaved[sh]=true;dbSave();toast('Shift '+cap(sh)+' tersimpan dan dikunci ✓');renderShifts();calcAll();}
+function editShift(sh){state.shiftSaved[sh]=false;dbSave();toast('Shift '+cap(sh)+' dibuka untuk diedit.');renderShifts();calcAll();}
+
+function confirmResetShift(sh){
+  if(confirm('Reset data shift '+cap(sh)+'? Semua nilai akan menjadi 0.')){
+    state.shiftSaved[sh]=false;
+    BBM.forEach(b=>{
+      const aEl=e(`${sh}-awal-${b}`);if(aEl&&!aEl.readOnly)aEl.value=0;
+      const jEl=e(`${sh}-jual-${b}`);if(jEl){jEl.value=0;jEl.dataset.jualAsli='';}
+      const tEl=e(`${sh}-tambah-${b}`);if(tEl)tEl.value=0;
+      const hEl=e(`${sh}-habis-${b}`);if(hEl)hEl.checked=false;
+    });
+    renderShifts();calcAll();toast('Shift '+cap(sh)+' direset ke 0.');
+  }
+}
+
+function confirmResetAll(){
+  if(confirm('Reset semua data? Semua shift akan kembali ke 0.')){
+    SO.forEach(sh=>{state.shiftSaved[sh]=false;});
+    state.sel={pagi:true,siang:false,malam:false};
+    state.midShift={pagi:false,siang:false,malam:false};
+    state.biayaItems=[];
+    state.biayaId=1;
+    state.biayaId=1;
+    dbSave();
+    showPage('input');
+    toast('Semua data direset.');
+  }
+}
+
+// ─── COMPUTE ────────────────────────────────────────────────
+function calcShift(sh){
+  const notices=[];
+  BBM.forEach(b=>{
+    const awal=gv(`${sh}-awal-${b}`);
+    const habis=gck(`${sh}-habis-${b}`);
+    const jEl=e(`${sh}-jual-${b}`);
+    // Baca nilai jual: jika habis, gunakan nilai asli dari dataset (bukan 0)
+    const jual=habis&&jEl?.dataset?.jualAsli?parseInt((jEl.dataset.jualAsli||'0').replace(/\./g,''))||0:gv(`${sh}-jual-${b}`);
+    // Mid-shift: masuk ke shift berjalan; Normal: ke shift berikutnya (tidak masuk calcRow ini)
+    const tambahMid=state.midShift&&state.midShift[sh]?gv(`${sh}-tambahMid-${b}`):0;
+    const jual2=getJual2(sh,b);
+    const r=calcRow(awal,jual,tambahMid,habis,jual2);
+    if(jEl&&!state.shiftSaved[sh]){if(habis){
+      // Simpan nilai jual asli sebelum dikunci — dipakai untuk hitung losses
+      if(jEl.dataset.jualAsli===undefined||jEl.dataset.jualAsli==='')jEl.dataset.jualAsli=jEl.value;
+      jEl.value=jEl.dataset.jualAsli||'0'; // tampilkan nilai asli (bukan 0) di field
+      jEl.readOnly=true;jEl.className='inp inp-num';jEl.style.background='var(--red-bg)';jEl.style.color='var(--red)';
+    }else{jEl.dataset.jualAsli='';jEl.readOnly=false;jEl.style.background='';jEl.style.color='';}}
+    const cc=e(`${sh}-catatan-cell-${b}`);
+    if(cc){
+      if(r.isLocked){
+        const cls=r.lockType==='losses'?'pill pill-zero-l':'pill pill-zero-p';
+        cc.innerHTML=`<span class="${cls}">0 🔒</span>`;
+      }else if(r.catatan===0){
+        cc.innerHTML=`<span class="pill pill-zero-l">0</span>`;
+      }else if(r.catatan<=BATAS[b]){
+        cc.innerHTML=`<span class="pill pill-rendah">${fN(r.catatan)}</span>`;
+      }else{
+        cc.innerHTML=`<span class="pill pill-ok">${fN(r.catatan)}</span>`;
+      }
+    }
+    const sc2=e(`${sh}-sel-cell-${b}`);
+    if(sc2){if(r.isLocked&&r.lockType==='losses'){sc2.innerHTML=`<span class="losses-val">▲ Losses ${fN(r.losses)} ltr 🔒<br><small style="font-weight:400">Stok ${fN(awal)} − Jual ${fN(jual)} = <strong>${fN(r.losses)}</strong></small></span>`;}else if(r.isLocked&&r.lockType==='plus'){sc2.innerHTML=`<span class="plus-val">↑ Plus +${fN(r.plus)} ltr 🔒<br><small style="font-weight:400">Jual ${fN(jual)} − Stok ${fN(awal)} = <strong>${fN(r.plus)}</strong></small></span>`;}else{sc2.innerHTML='<span style="color:var(--text3);font-size:12px">— Normal</span>';}}
+    const ns=e(`${sh}-stk-cur-${b}`);
+    if(ns){if(tambahMid>0){ns.textContent=`Stok berjalan: ${fN(r.stokAkhirEfektif)} ltr`;}else{ns.textContent='';}}
+    const tr=e(`tr-${sh}-${b}`);
+    if(tr)tr.className=r.isLocked&&r.lockType==='losses'?'row-losses':r.isLocked&&r.lockType==='plus'?'row-plus':state.shiftSaved[sh]?'row-saved':'';
+    const st2=e(`${sh}-status-${b}`);
+    if(st2){if(r.isLocked&&r.lockType==='losses'){let s=`<span class="bx bl">Losses 🔒</span>`;if(tambahMid>0)s+=` <span class="bx bn">+${fN(tambahMid)} baru</span>`;st2.innerHTML=s;}else if(r.isLocked&&r.lockType==='plus'){let s=`<span class="bx bp">Plus 🔒</span>`;if(tambahMid>0)s+=` <span class="bx bn">+${fN(tambahMid)} baru</span>`;st2.innerHTML=s;}else if(r.catatan<=BATAS[b]&&r.catatan>0){st2.innerHTML='<span class="bx bw">Rendah</span>';}else{st2.innerHTML='<span class="bx bk">OK</span>';}}
+    if(r.isLocked&&r.lockType==='losses'){
+      let msg=`▲ <strong>${BL[b]}</strong>: Tangki habis — Losses = Stok ${fN(awal)} − Jual ${fN(jual)} = <strong>${fN(r.losses)} ltr 🔒</strong> — kerugian margin ${fRF(r.losses*(gHJ(b)-gHPP(b)))}.`;
+      if(tambahMid>0&&jual2>0)msg+=` Tambah ${fN(tambahMid)} ltr → Jual lanjutan ${fN(jual2)} ltr → Stok akhir ${fN(r.stokAkhirEfektif)} ltr.`;
+      else if(tambahMid>0)msg+=` Tambah ${fN(tambahMid)} ltr masuk sebagai stok baru → Stok akhir ${fN(r.stokAkhirEfektif)} ltr.`;
+      notices.push(`<div class="nt nt-d">${msg}</div>`);
+    }
+    if(r.isLocked&&r.lockType==='plus'){let msg=`↑ <strong>${BL[b]}</strong>: Plus = ${fN(jual)}−${fN(awal)} = <strong>${fN(r.plus)} ltr</strong> 🔒 — keuntungan +${fRF(r.plus*gHJ(b))}.`;if(tambahMid>0)msg+=` Penambahan ${fN(tambahMid)} ltr = stok baru.`;notices.push(`<div class="nt nt-p">${msg}</div>`);}
+    if(!r.isLocked&&r.catatan>0&&r.catatan<=BATAS[b])notices.push(`<div class="nt nt-w">⚠ <strong>${BL[b]}</strong>: Stok menipis sisa ${fN(r.catatan)} ltr.</div>`);
+    if(tambahMid>0&&!r.isLocked)notices.push(`<div class="nt nt-s">+ <strong>${BL[b]}</strong>: Penambahan ${fN(tambahMid)} ltr berjalan — stok akhir ${fN(r.stokAkhirEfektif)} ltr.</div>`);
+  });
+  const nb=e(`notice-${sh}`);if(nb)nb.innerHTML=notices.join('');
+}
+
+function propagate(fromSh,toSh){
+  BBM.forEach(b=>{
+    const awal=gv(`${fromSh}-awal-${b}`);const habis=gck(`${fromSh}-habis-${b}`);
+    const jual=gv(`${fromSh}-jual-${b}`);const tambah=gv(`${fromSh}-tambah-${b}`);
+    const jual2p1=getJual2(fromSh,b);
+    const r=calcRow(awal,jual,tambah,habis,jual2p1);
+    const toEl=e(`${toSh}-awal-${b}`);
+    if(toEl&&toEl.readOnly&&!state.shiftSaved[toSh]){
+      const nilaiAwal=Math.max(0,r.stokAkhirEfektif);
+      toEl.value=nilaiAwal;
+      const infoEl=e(`${toSh}-awal-info-${b}`);
+      if(infoEl){infoEl.textContent=`↑ stok akhir ${cap(fromSh)}: ${fN(nilaiAwal)} ltr`;infoEl.style.color=nilaiAwal>0?'var(--blue)':'var(--red)';}
+    }
+  });calcShift(toSh);
+}
+
+// Tampilkan scroll hint untuk tabel lebar di mobile
+function showScrollHints(){
+  if(window.innerWidth>768)return;
+  document.querySelectorAll('.tbl-wrap').forEach(w=>{
+    if(w.scrollWidth>w.clientWidth){
+      const hint=w.previousElementSibling;
+      if(hint&&hint.id==='scroll-hint')hint.style.display='block';
+    }
+  });
+}
+
+function calcAll(){
+  const active=SO.filter(s=>state.sel[s]);
+  active.forEach((sh,idx)=>{calcShift(sh);if(idx<active.length-1)propagate(sh,active[idx+1]);});
+  // Refresh jual2 visibility untuk semua shift aktif
+  active.forEach(sh=>toggleJual2Visibility(sh));
+  updatePreviewIfOpen();
+}
+
+function onJual2Change(sh,b){
+  // Sync nilai jual2-alt ke jual2 inline (agar getJual2 konsisten)
+  const altEl=e(`${sh}-jual2-alt-${b}`);
+  const inlineEl=e(`${sh}-jual2-${b}`);
+  if(altEl&&inlineEl)inlineEl.value=altEl.value;
+  // Update info stok berjalan
+  const tambah=gv(`${sh}-tambah-${b}`)||0;
+  const j2=getJual2(sh,b);
+  const curEl=e(`${sh}-j2cur-${b}`);
+  if(curEl&&tambah>0){
+    const sisa=Math.max(0,tambah-j2);
+    curEl.textContent=`Sisa: ${fN(sisa)} ltr`;
+    curEl.style.color=sisa<1000?'var(--red)':'var(--green)';
+  }
+  onFC(sh,b);
+}
+function onFC(sh,b){
+  // Simpan draft nilai saat ini ke state agar tidak hilang saat renderShifts
+  if(!state.draft)state.draft={};
+  if(!state.draft[sh])state.draft[sh]={};
+  BBM.forEach(bb=>{
+    const awalEl=e(`${sh}-awal-${bb}`);
+    const jualEl=e(`${sh}-jual-${bb}`);
+    const habisEl=e(`${sh}-habis-${bb}`);
+    const tambahEl=e(`${sh}-tambah-${bb}`);
+    const jual2ElDraft=e(`${sh}-jual2-${bb}`);
+    if(jualEl)state.draft[sh][bb]={
+      awal:awalEl?parseInt((awalEl.value||'0').replace(/\./g,''))||0:0,
+      jual:parseInt((jualEl.value||'0').replace(/\./g,''))||0,
+      habis:habisEl?habisEl.checked:false,
+      tambah:tambahEl?parseInt((tambahEl.value||'0').replace(/\./g,''))||0:0,
+      jual2:jual2ElDraft?parseInt((jual2ElDraft.value||'0').replace(/\./g,''))||0:0
+    };
+  });
+  calcShift(sh);
+  const active=SO.filter(s=>state.sel[s]);const idx=active.indexOf(sh);
+  for(let i=idx+1;i<active.length;i++)propagate(active[i-1],active[i]);
+  updatePreviewIfOpen();
+}
+function onHabis(sh,b){
+  const jEl=e(`${sh}-jual-${b}`);
+  const habis=gck(`${sh}-habis-${b}`);
+  if(jEl){
+    if(habis){
+      // Simpan nilai jual asli sebelum dikunci, lalu tampilkan (merah, readonly)
+      if(!jEl.dataset.jualAsli||jEl.dataset.jualAsli==='')jEl.dataset.jualAsli=jEl.value;
+    }else{
+      // Uncentang — restore nilai asli dan buka kunci
+      if(jEl.dataset.jualAsli)jEl.value=jEl.dataset.jualAsli;
+      jEl.dataset.jualAsli='';
+      jEl.readOnly=false;jEl.style.background='';jEl.style.color='';
+    }
+  }
+  onFC(sh,b);
+}
+function onTambahTargetChange(sh){
+  const active=SO.filter(s=>state.sel[s]);
+  const idx=active.indexOf(sh);
+  const nextSh=idx<active.length-1?active[idx+1]:null;
+  const targetEl=document.querySelector(`input[name="${sh}-tambah-target"]:checked`);
+  const target=targetEl?targetEl.value:'current';
+  const infoEl=e(`${sh}-tambah-target-info`);
+  if(infoEl){
+    if(target==='next'&&nextSh){
+      infoEl.textContent=`→ Akan ditambahkan ke stok awal Shift ${cap(nextSh)}`;
+      infoEl.style.color='var(--amber)';
+    }else{
+      infoEl.textContent='→ Ditambahkan ke stok shift berjalan';
+      infoEl.style.color='var(--green)';
+    }
+  }
+  // Refresh visibility jual2
+  toggleJual2Visibility(sh);
+  // Recalc — penambahan ke next shift mempengaruhi propagasi
+  BBM.forEach(b=>{
+    const el2=e(`${sh}-stk-cur-${b}`);
+    const tambah=gv(`${sh}-tambah-${b}`);
+    if(el2){
+      if(tambah>0&&target==='current'){
+        const awal=gv(`${sh}-awal-${b}`);const jual=gv(`${sh}-jual-${b}`);const habis=gck(`${sh}-habis-${b}`);
+        const r=calcRow(awal,jual,tambah,habis);
+        el2.textContent=`Stok berjalan: ${fN(r.stokAkhirEfektif)} ltr`;
+      }else if(tambah>0&&target==='next'){
+        el2.textContent=`→ +${fN(tambah)} ltr ke Shift ${cap(nextSh)}`;
+        el2.style.color='var(--amber)';
+      }else{el2.textContent='';}
+    }
+  });
+  calcAll();
+}
+
+function getTambahTarget(sh){
+  const el=document.querySelector(`input[name="${sh}-tambah-target"]:checked`);
+  return el?el.value:'current';
+}
+
+function propagate(fromSh,toSh){
+  BBM.forEach(b=>{
+    const awal=gv(`${fromSh}-awal-${b}`);const habis=gck(`${fromSh}-habis-${b}`);
+    const jElF=e(`${fromSh}-jual-${b}`);
+    const jual=habis&&jElF?.dataset?.jualAsli?parseInt((jElF.dataset.jualAsli||'0').replace(/\./g,''))||0:gv(`${fromSh}-jual-${b}`);
+    // Mid-shift: masuk ke shift berjalan (fromSh)
+    const tambahMid=state.midShift&&state.midShift[fromSh]?gv(`${fromSh}-tambah-${b}`):0;
+    // Tambah Normal: masuk ke stok awal shift berikutnya (toSh)
+    const tambahNormal=state.tambahNormal&&state.tambahNormal[fromSh]
+      ?parseInt((e(`${fromSh}-tambah-normal-${b}`)?.value||'0').replace(/\./g,''))||0:0;
+    const jual2=getJual2(fromSh,b);
+    const r=calcRow(awal,jual,tambahMid,habis,jual2);
+    const toEl=e(`${toSh}-awal-${b}`);
+    if(toEl&&toEl.readOnly&&!state.shiftSaved[toSh]){
+      // Stok awal shift berikutnya = stok akhir efektif fromSh + tambah normal
+      const nilaiAwal=Math.max(0,r.stokAkhirEfektif+tambahNormal);
+      toEl.value=fN(nilaiAwal);
+      const infoEl=e(`${toSh}-awal-info-${b}`);
+      if(infoEl){
+        infoEl.textContent=tambahNormal>0
+          ?`↑ stok akhir ${cap(fromSh)} ${fN(r.stokAkhirEfektif)} + tambah ${fN(tambahNormal)} = ${fN(nilaiAwal)} ltr`
+          :`↑ stok akhir ${cap(fromSh)}: ${fN(nilaiAwal)} ltr`;
+        infoEl.style.color=nilaiAwal>0?'var(--blue)':'var(--red)';
+      }
+    }
+  });calcShift(toSh);
+}
+
+function onTambahChange(sh,b){
+  const target=getTambahTarget(sh);
+  const active=SO.filter(s=>state.sel[s]);
+  const idx=active.indexOf(sh);
+  const nextSh=idx<active.length-1?active[idx+1]:null;
+  const tambah=gv(`${sh}-tambah-${b}`);
+  const el2=e(`${sh}-stk-cur-${b}`);
+  // Tampilkan/sembunyikan field Jual 2 jika ada tambah untuk shift ini
+  toggleJual2Visibility(sh);
+  if(el2){
+    if(tambah>0&&target==='next'&&nextSh){
+      el2.textContent=`→ +${fN(tambah)} ltr ke Shift ${cap(nextSh)}`;
+      el2.style.color='var(--amber)';
+    }else if(tambah>0){
+      const awal=gv(`${sh}-awal-${b}`);const jual=gv(`${sh}-jual-${b}`);const habis=gck(`${sh}-habis-${b}`);
+      const jual2=getJual2(sh,b);
+      const r=calcRow(awal,jual,tambah,habis,jual2);
+      el2.textContent=`Stok berjalan: ${fN(r.stokAkhirEfektif)} ltr`;
+      el2.style.color='var(--green)';
+    }else{el2.textContent='';}
+  }
+  onFC(sh,b);
+}
+
+// Tampilkan kolom Jual 2 jika ada penambahan mid-shift untuk shift ini
+// ── Tambah Normal: stok untuk shift berikutnya ──────────────
+function toggleTambahNormal(sh){
+  if(!state.tambahNormal)state.tambahNormal={pagi:false,siang:false,malam:false};
+  state.tambahNormal[sh]=!state.tambahNormal[sh];
+  const aktif=state.tambahNormal[sh];
+  const sec=e(`${sh}-normal-sec`);
+  if(sec)sec.style.display=aktif?'block':'none';
+  if(!aktif){
+    BBM.forEach(b=>{
+      const el=e(`${sh}-tambah-normal-${b}`);if(el)el.value='0';
+      if(state.draft&&state.draft[sh]&&state.draft[sh][b])state.draft[sh][b].tambahNormal=0;
+    });
+    calcAll();
+  }
+}
+
+function onTambahNormalChange(sh,b){
+  // Update info: akan masuk ke stok awal shift berikutnya
+  const active=SO.filter(s=>state.sel[s]);
+  const idx=active.indexOf(sh);
+  const nextSh=idx<active.length-1?active[idx+1]:null;
+  const val=parseInt((e(`${sh}-tambah-normal-${b}`)?.value||'0').replace(/\./g,''))||0;
+  const infoEl=e(`${sh}-tn-info-${b}`);
+  if(infoEl){
+    infoEl.textContent=nextSh&&val>0?`→ Stok Awal ${cap(nextSh)}: +${fN(val)} ltr`:'';
+    infoEl.style.color='var(--amber)';
+  }
+  // Simpan ke draft
+  if(!state.draft)state.draft={};
+  if(!state.draft[sh])state.draft[sh]={};
+  if(!state.draft[sh][b])state.draft[sh][b]={};
+  state.draft[sh][b].tambahNormal=val;
+  // Propagasi ke stok awal shift berikutnya
+  if(nextSh)propagateTambahNormal(sh,nextSh);
+  calcAll();
+}
+
+// Propagasi tambah normal: tambahkan ke stok awal shift berikutnya
+function propagateTambahNormal(fromSh,toSh){
+  BBM.forEach(b=>{
+    const normalVal=parseInt((e(`${fromSh}-tambah-normal-${b}`)?.value||'0').replace(/\./g,''))||0;
+    const toAwalEl=e(`${toSh}-awal-${b}`);
+    if(toAwalEl&&toAwalEl.readOnly&&!state.shiftSaved[toSh]){
+      // Stok awal shift berikutnya = stok akhir efektif shift ini + tambah normal
+      const active=SO.filter(s=>state.sel[s]);
+      const fromIdx=active.indexOf(fromSh);
+      if(fromIdx>=0&&fromIdx<active.length-1){
+        // Hitung stok akhir efektif shift fromSh
+        const awal=gv(`${fromSh}-awal-${b}`);
+        const habis=gck(`${fromSh}-habis-${b}`);
+        const jElF=e(`${fromSh}-jual-${b}`);
+        const jual=habis&&jElF?.dataset?.jualAsli?parseInt((jElF.dataset.jualAsli||'0').replace(/\./g,''))||0:gv(`${fromSh}-jual-${b}`);
+        const tambah=gv(`${fromSh}-tambah-${b}`);
+        const jual2=getJual2(fromSh,b);
+        const r=calcRow(awal,jual,tambah,habis,jual2);
+        const stokAkhir=r.stokAkhirEfektif;
+        // Stok awal shift berikutnya = stok akhir + tambah normal
+        const nilaiAwal=Math.max(0,stokAkhir+normalVal);
+        toAwalEl.value=fN(nilaiAwal);
+        toAwalEl.dataset.fromNormal=normalVal;
+        // Update info label
+        const infoEl=e(`${toSh}-awal-info-${b}`);
+        if(infoEl)infoEl.textContent=normalVal>0
+          ?`↑ stok akhir ${cap(fromSh)} ${fN(stokAkhir)} + tambah ${fN(normalVal)} = ${fN(nilaiAwal)} ltr`
+          :`↑ stok akhir ${cap(fromSh)}: ${fN(stokAkhir)} ltr`;
+      }
+    }
+  });
+}
+
+function toggleMidShift(sh){
+  if(!state.midShift)state.midShift={pagi:false,siang:false,malam:false};
+  state.midShift[sh]=!state.midShift[sh];
+  const aktif=state.midShift[sh];
+  // ID: "${sh}-mid-sec" sesuai HTML template
+  const sec=e(`${sh}-mid-sec`);
+  if(sec)sec.style.display=aktif?'block':'none';
+  if(!aktif){
+    BBM.forEach(b=>{
+      const tEl=e(`${sh}-tambah-${b}`);if(tEl)tEl.value='0';
+      const j2El=e(`${sh}-jual2-${b}`);if(j2El)j2El.value='0';
+    });
+    // Sembunyikan jual2-section juga
+    const j2sec=e(`${sh}-jual2-section`);
+    if(j2sec)j2sec.style.display='none';
+    const thJ2=e(`${sh}-th-jual2`);
+    if(thJ2)thJ2.style.display='none';
+    BBM.forEach(b=>{
+      const j2El=e(`${sh}-jual2-${b}`);if(j2El)j2El.style.display='none';
+    });
+    calcAll();
+  } else {
+    toggleJual2Visibility(sh);
+  }
+}
+
+function toggleJual2Visibility(sh){
+  const target=getTambahTarget(sh);
+  const adaTambah=BBM.some(b=>gv(`${sh}-tambah-${b}`)>0);
+  const midAktif=state.midShift&&state.midShift[sh];
+  const tampilkan=midAktif&&adaTambah&&target==='current';
+  // Section Jual 2 di dalam mid-sec
+  const sec=e(`${sh}-jual2-section`);
+  if(sec)sec.style.display=tampilkan?'block':'none';
+  // Header kolom Jual 2 di tabel
+  const thJual2=e(`${sh}-th-jual2`);
+  if(thJual2)thJual2.style.display=tampilkan?'':'none';
+  // Field jual2 inline di tabel (display:none by default, muncul saat tampilkan=true)
+  BBM.forEach(b=>{
+    const j2El=e(`${sh}-jual2-${b}`);
+    if(j2El)j2El.style.display=tampilkan?'block':'none';
+  });
+}
+
+function getAkum(){
+  const active=SO.filter(s=>state.sel[s]);const out={};
+  BBM.forEach(b=>{
+    const awal=gv(`${active[0]}-awal-${b}`)||0;
+    let tJual=0,tTambah=0,tLosses=0,tPlus=0,stokAkhir=0;
+    active.forEach(sh=>{
+      const a=gv(`${sh}-awal-${b}`)||0;const habis=gck(`${sh}-habis-${b}`);
+      // Baca nilai jual: jika habis, ambil dari dataset.jualAsli (nilai sebelum dikunci)
+      const jEl=e(`${sh}-jual-${b}`);
+      const jual=habis&&jEl?.dataset?.jualAsli?parseInt((jEl.dataset.jualAsli||'0').replace(/\./g,''))||0:gv(`${sh}-jual-${b}`)||0;
+      const tambahMidGA=state.midShift&&state.midShift[sh]?gv(`${sh}-tambah-${b}`)||0:0;
+      const tambahNormalGA=state.tambahNormal&&state.tambahNormal[sh]
+        ?parseInt((e(`${sh}-tambah-normal-${b}`)?.value||'0').replace(/[^0-9]/g,''))||0:0;
+      const jual2ga=getJual2(sh,b);
+      const r=calcRow(a,jual,tambahMidGA,habis,jual2ga);
+      tJual+=r.jualEfektif;tTambah+=tambahMidGA+tambahNormalGA;tLosses+=r.losses;tPlus+=r.plus;stokAkhir=r.stokAkhirEfektif;
+    });
+    out[b]={awal,tJual,tTambah,tLosses,tPlus,stokAkhir};
+  });
+  return{active,out};
+}
+
+// ─── PREVIEW ────────────────────────────────────────────────
+let previewOpen=false;
+function updatePreviewIfOpen(){if(previewOpen)showPreview(false,true);}
+function showPreview(autoSave=false,update=false){
+  previewOpen=true;
+  const active=SO.filter(s=>state.sel[s]);
+  if(!active.length){toast('Pilih minimal 1 shift!');return;}
+  const{out}=getAkum();
+  let tA=0,tJ=0,tT=0,tK=0,tL=0,tP=0,tO=0,tM=0,tLRp=0,tPRp=0;
+  const notices=[];
+  const rows=BBM.map(b=>{
+    const d=out[b];const vol=d.tJual+d.tPlus;
+    const omzet=vol*gHJ(b),margin=vol*(gHJ(b)-gHPP(b));
+    const _mg3=gHJ(b)-gHPP(b);const lRp=d.tLosses*_mg3,pRp=d.tPlus*_mg3;
+    tA+=d.awal;tJ+=d.tJual;tT+=d.tTambah;tK+=d.stokAkhir;tL+=d.tLosses;tP+=d.tPlus;tO+=omzet;tM+=margin;tLRp+=lRp;tPRp+=pRp;
+    const shHtml=d.tLosses>0&&d.tPlus>0?'<span class="bx bl">L🔒</span><span class="bx bp">P🔒</span>':d.tLosses>0?'<span class="bx bl">Losses 🔒</span>':d.tPlus>0?`<span class="bx bp">+${fN(d.tPlus)} 🔒</span>`:'<span class="bx bk">Normal</span>';
+    if(d.tLosses>0)notices.push(`<div class="nt nt-d">▲ <strong>${BL[b]}</strong>: Losses ${fN(d.tLosses)} ltr = ${fRF(lRp)} 🔒</div>`);
+    if(d.tPlus>0)notices.push(`<div class="nt nt-p">↑ <strong>${BL[b]}</strong>: Plus ${fN(d.tPlus)} ltr = +${fRF(pRp)} 🔒</div>`);
+    return`<tr><td><span class="tag ${BT[b]}">${BL[b]}</span></td><td>${fN(d.awal)}</td><td>${fN(d.tJual)}</td><td style="color:var(--green)">+${fN(d.tTambah)}</td><td style="font-weight:700">${fN(d.stokAkhir)}</td><td>${shHtml}</td><td style="color:var(--red)">${d.tLosses>0?'-'+fN(d.tLosses)+' 🔒':'—'}</td><td style="color:var(--purple)">${d.tPlus>0?'+'+fN(d.tPlus)+' 🔒':'—'}</td><td>${fR(omzet)}</td></tr>`;
+  });
+  const ops=getTotalBiaya();const bersih=tM-ops-tLRp+tPRp;
+  const pv=e('form-preview');
+  if(!pv)return;
+  pv.style.display='block';
+  pv.innerHTML=`<div class="preview-section">
+    <div class="preview-title">📊 Pratinjau Ringkasan</div>
+    ${notices.join('')}
+    <div class="tbl-wrap"><table style="margin-bottom:14px"><thead><tr><th style="text-align:left">BBM</th><th>Stok Awal</th><th>Jual</th><th>Tambah</th><th>Stok Akhir</th><th>Status</th><th style="color:var(--red)">Losses 🔒</th><th style="color:var(--purple)">Plus 🔒</th><th>Omzet</th></tr></thead><tbody>${rows.join('')}</tbody><tfoot><tr><td>Total</td><td>${fN(tA)}</td><td>${fN(tJ)}</td><td>+${fN(tT)}</td><td>${fN(tK)}</td><td>—</td><td>${tL>0?'-'+fN(tL)+' ltr':'—'}</td><td>${tP>0?'+'+fN(tP)+' ltr':'—'}</td><td>${fR(tO)}</td></tr></tfoot></table></div>
+    <div class="sep"></div>
+    <div class="rrow"><span class="rl">Omzet Kotor</span><span class="rv">${fRF(tO)}</span></div>
+    <div class="rrow"><span class="rl">Laba Kotor</span><span class="rv" style="color:${tM>=0?'var(--green)':'var(--red)'}">${fRF(tM)}</span></div>
+    <div class="rrow"><span class="rl">Total Biaya Operasional</span><span class="rv" style="color:var(--red)">-${fRF(ops)}</span></div>
+    <div class="rrow"><span class="rl" style="color:var(--red)">▲ Kerugian Losses</span><span class="rv" style="color:var(--red)">${tLRp>0?'-'+fRF(tLRp):'-Rp 0'}</span></div>
+    <div class="rrow"><span class="rl" style="color:var(--purple)">↑ Keuntungan Plus</span><span class="rv" style="color:var(--purple)">${tPRp>0?'+'+fRF(tPRp):'+Rp 0'}</span></div>
+    <div class="rrow tot"><span>Laba Bersih</span><span class="rv" style="color:${bersih>=0?'var(--green)':'var(--red)'}";font-size:16px">${fRF(bersih)}</span></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn btn-ghost" onclick="previewOpen=false;e('form-preview').style.display='none'">Tutup</button>
+      <button class="btn btn-save btn-lg" onclick="saveData()">💾 Simpan Data Hari Ini</button>
+    <button class="btn btn-ghost btn-sm" onclick="printLaporanHarian()" style="margin-left:8px">🖨 Print Laporan</button>
+    </div>
+  </div>`;
+  if(!update)setTimeout(()=>pv.scrollIntoView({behavior:'smooth',block:'nearest'}),50);
+  if(autoSave)saveData();
+}
+
+// ─── BIAYA ──────────────────────────────────────────────────
+function fmtB(el){const raw=el.value.replace(/\./g,'').replace(/\D/g,'');if(!raw){el.value='';return;}el.value=parseInt(raw).toLocaleString('id');}
+function getTotalBiaya(){return state.biayaItems.reduce((s,i)=>s+i.nom,0);}
+function addBiaya(){
+  const ket=e('b-ket').value.trim();const cat=e('b-cat').value;const nom=parseInt((e('b-nom').value||'').replace(/\./g,''))||0;
+  if(!ket){toast('Keterangan tidak boleh kosong!');return;}if(nom<=0){toast('Nominal harus lebih dari 0!');return;}
+  state.biayaItems.push({id:state.biayaId++,ket,cat,nom});
+  e('b-ket').value='';e('b-nom').value='';e('b-cat').value='gaji';
+  renderBiaya();dbSave();
+}
+function delBiaya(id){state.biayaItems=state.biayaItems.filter(i=>i.id!==id);renderBiaya();dbSave();}
+function renderBiaya(){
+  const tbody=e('biaya-tbody');if(!tbody)return;
+  if(!state.biayaItems.length){tbody.innerHTML='<tr><td colspan="5" class="empty-state">Belum ada item. Tambahkan di atas.</td></tr>';st('biaya-total','Rp 0');const cr=e('biaya-cat-rows');if(cr)cr.innerHTML='';return;}
+  tbody.innerHTML=state.biayaItems.map((item,idx)=>{const c=CATS[item.cat]||CATS.lainnya;return`<tr><td style="color:var(--text3)">${idx+1}</td><td>${esc(item.ket)}</td><td><span class="cat-badge" style="background:${c.bg};color:${c.color}">${c.label}</span></td><td>Rp ${fN(item.nom)}</td><td><button class="btn btn-del btn-sm" onclick="delBiaya(${item.id})"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M6 2h4M2 4h12M5 4v8a1 1 0 001 1h4a1 1 0 001-1V4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M7 7v4M9 7v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button></td></tr>`;}).join('');
+  st('biaya-total','Rp '+fN(getTotalBiaya()));
+  const catTotals={};state.biayaItems.forEach(i=>catTotals[i.cat]=(catTotals[i.cat]||0)+i.nom);
+  const cr=e('biaya-cat-rows');if(cr)cr.innerHTML=Object.entries(catTotals).map(([cat,sum])=>{const c=CATS[cat]||CATS.lainnya;return`<div class="rrow"><span class="rl"><span class="cat-badge" style="background:${c.bg};color:${c.color}">${c.label}</span></span><span class="rv">Rp ${fN(sum)}</span></div>`;}).join('');
+}
+
+// ─── SAVE ───────────────────────────────────────────────────
+function saveData(){
+  const tanggal=e('f-tanggal')?.value||'';
+  if(!tanggal){toast('Tanggal harus diisi!');return;}
+  const active=SO.filter(s=>state.sel[s]);if(!active.length){toast('Pilih minimal 1 shift!');return;}
+  const shiftData={};
+  active.forEach(sh=>{shiftData[sh]={};BBM.forEach(b=>{
+    const awal=gv(`${sh}-awal-${b}`)||0;const habis=gck(`${sh}-habis-${b}`);
+    // Baca nilai jual: jika habis, ambil dari dataset.jualAsli (nilai sebelum dikunci)
+    const jElS=e(`${sh}-jual-${b}`);
+    const jual=habis&&jElS?.dataset?.jualAsli?parseInt((jElS.dataset.jualAsli||'0').replace(/\./g,''))||0:gv(`${sh}-jual-${b}`)||0;
+    const jual2sd=getJual2(sh,b);
+    const tambahMidSD=state.midShift&&state.midShift[sh]?gv(`${sh}-tambah-${b}`)||0:0;
+    const tambahNormalSD=state.tambahNormal&&state.tambahNormal[sh]
+      ?parseInt((e(`${sh}-tambah-normal-${b}`)?.value||'0').replace(/\./g,''))||0:0;
+    const r=calcRow(awal,jual,tambahMidSD,habis,jual2sd);
+    shiftData[sh][b]={awal,jual:r.jualEfektif,jual2:jual2sd,tambah:tambahMidSD,tambahNormal:tambahNormalSD,habis,catatan:r.catatan,losses:r.losses,plus:r.plus,stokBaru:r.stokBaru,stokAkhirEfektif:r.stokAkhirEfektif,isLocked:r.isLocked,lockType:r.lockType};
+  });});
+  const{out}=getAkum();
+  let tJual=0,tOmzet=0,tMargin=0,tLRp=0,tPRp=0;
+  const hargaAktif=getHargaPadaTanggal(tanggal,'_snap_')||{};
+  BBM.forEach(b=>{const d=out[b];const vol=d.tJual+d.tPlus;const {hj,hpp}=getHargaPadaTanggal(tanggal,b);const margin=hj-hpp;tJual+=vol;tOmzet+=vol*hj;tMargin+=vol*margin;tLRp+=d.tLosses*margin;tPRp+=d.tPlus*margin;});
+  const ops=getTotalBiaya();
+  const hargaSnapshot={...state.harga};
+  const rec={tanggal,hari:e('f-hari')?.value||'',shifts:active,shiftData,biayaItems:[...state.biayaItems],ops,totalJual:tJual,totalOmzet:tOmzet,totalMargin:tMargin,tLRp,tPRp,labaBersih:tMargin-ops-tLRp+tPRp,hargaSnapshot,savedAt:new Date().toISOString()};
+  const idx=state.savedData.findIndex(d=>d.tanggal===tanggal);
+  if(idx>=0)state.savedData[idx]=rec;else state.savedData.unshift(rec);
+  state.savedData=state.savedData.slice(0,365);
+  state.draft={};state.shiftSaved={pagi:false,siang:false,malam:false};state.midShift={pagi:false,siang:false,malam:false};
+  dbSave();
+  toast('✓ Data '+tanggal+' tersimpan!');
+  // ── Sync ke Firebase (real-time, primary) ──────────────
+  if(_fbInited) fbSaveDay(rec).catch(()=>{});
+  // ── Sync ke Apps Script/Google Sheets (backup) ──────────
+  const _asUrl=localStorage.getItem(CLOUD_KEY)||'';
+  if(_asUrl&&_asUrl!=='firebase'&&_asUrl.startsWith('https://')){
+    fetch(_asUrl,{method:'POST',headers:{'Content-Type':'text/plain'},
+      body:JSON.stringify({action:'save',data:rec})
+    }).catch(()=>{}); // silent — tidak blok UI
+  }
+  previewOpen=false;
+  showPage('stok');
+  // Auto cloud sync jika URL sudah diatur
+  if(getCloudUrl()){
+    cloudSave(rec).then(r=>{
+      if(r.ok)toast('☁ Tersinkron ke cloud: '+tanggal);
+      else toast('⚠ Simpan lokal OK, cloud gagal: '+r.msg);
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// PAGE: STOK BBM
+// ════════════════════════════════════════════════════════════
+function renderStokPage(main){
+  // ── Hitung running stok kumulatif dari semua savedData ───
+  function getRunningStok(){
+    const sorted=[...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+    const run={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+    const rows=[];
+    sorted.forEach(d=>{
+      const ac=d.shifts;
+      BBM.forEach(b=>{
+        const awal=d.shiftData[ac[0]]?.[b]?.awal||0;
+        let jual=0,tambah=0,losses=0,plus=0;
+        ac.forEach(sh=>{const sd=d.shiftData[sh]?.[b]||{};jual+=sd.jual||0;tambah+=sd.tambah||0;losses+=sd.losses||0;plus+=sd.plus||0;});
+        const akhir=d.shiftData[ac[ac.length-1]]?.[b]?.stokAkhirEfektif||0;
+        run[b]=akhir;
+      });
+      rows.push({tanggal:d.tanggal,hari:d.hari,stokAkhir:{...run}});
+    });
+    return rows;
+  }
+
+  // ── Stok sistem terkini = stok akhir hari terakhir tersimpan ─
+  function getStokSistemTerkini(){
+    const sorted=[...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+    const res={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+    if(!sorted.length)return res;
+    const d=sorted[sorted.length-1];const ac=d.shifts;
+    BBM.forEach(b=>{res[b]=d.shiftData[ac[ac.length-1]]?.[b]?.stokAkhirEfektif||0;});
+    return res;
+  }
+
+  if(!state.savedData.length){
+    main.innerHTML=`<div class="page-header"><div class="page-title">Stok BBM</div></div><div class="card"><div class="empty-state">Belum ada data tersimpan. Input data melalui halaman Input Data.</div></div>`;
+    return;
+  }
+
+  const fd=state.savedData[0];
+  const ac=fd.shifts;let tA=0,tJ=0,tT=0,tK=0,tL=0,tP=0,tLRp=0,tPRp=0;
+  BBM.forEach(b=>{tA+=(fd.shiftData[ac[0]]?.[b]?.awal||0);const _hj=fd.hargaSnapshot?fd.hargaSnapshot[b]:gHJ(b);const _hpp=fd.hargaSnapshot?fd.hargaSnapshot['hpp_'+b]:gHPP(b);const _mg=_hj-_hpp;ac.forEach(sh=>{const d=fd.shiftData[sh]?.[b]||{};tJ+=d.jual||0;tT+=d.tambah||0;tL+=d.losses||0;tP+=d.plus||0;tLRp+=(d.losses||0)*_mg;tPRp+=(d.plus||0)*_mg;});tK+=(fd.shiftData[ac[ac.length-1]]?.[b]?.stokAkhirEfektif||0);});
+  const shiftNavBtns=ac.map((sh,i)=>`<button class="snavbtn${i===0?' active':''}" onclick="switchSV(this,'sv-${sh}')">${cap(sh)}</button>`).join('');
+  const shiftViews=ac.map((sh,i)=>{
+    const rows=BBM.map(b=>{const d=fd.shiftData[sh]?.[b]||{};const l=d.losses||0,p=d.plus||0,sb=d.stokBaru||0,sae=d.stokAkhirEfektif||0;const cHtml=d.isLocked?`<span class="pill ${d.lockType==='losses'?'pill-zero-l':'pill-zero-p'}">0 🔒</span>`:`<span class="pill pill-ok">${fN(d.catatan||0)}</span>`;const saeHtml=d.isLocked&&sb>0?`<span class="pill pill-new">${fN(sae)} baru</span>`:d.isLocked?`<span style="color:var(--text3)">0</span>`:`<span class="pill pill-ok">${fN(sae)}</span>`;return`<tr><td><span class="tag ${BT[b]}">${BL[b]}</span></td><td>${fN(d.awal||0)}</td><td>${fN(d.jual||0)}</td><td style="color:var(--green)">+${fN(d.tambah||0)}${d.tambah>0?'<br><small style="font-size:10px;color:var(--text3)">mid-shift</small>':''}</td><td>${cHtml}</td><td>${saeHtml}</td><td style="color:var(--red)">${l>0?'-'+fN(l)+' 🔒':'—'}</td><td style="color:var(--purple)">${p>0?'+'+fN(p)+' 🔒':'—'}</td></tr>`;}).join('');
+    return`<div id="sv-${sh}" style="display:${i===0?'block':'none'}"><div class="tbl-wrap"><table><thead><tr><th style="text-align:left">BBM</th><th>${i===0?'Stok Awal':'Dari '+cap(ac[i-1])}</th><th>Jual</th><th>Tambah</th><th>Stok Catatan</th><th>Stok Akhir Efektif</th><th style="color:var(--red)">Losses 🔒</th><th style="color:var(--purple)">Plus 🔒</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }).join('');
+  let rA=0,rT=0,rJ=0,rK=0,rL=0,rP=0,rO=0;
+  const rrows=BBM.map(b=>{const awal=fd.shiftData[ac[0]]?.[b]?.awal||0;let t=0,j=0,l=0,p=0;ac.forEach(sh=>{const d=fd.shiftData[sh]?.[b]||{};t+=d.tambah||0;j+=d.jual||0;l+=d.losses||0;p+=d.plus||0;});const k=fd.shiftData[ac[ac.length-1]]?.[b]?.stokAkhirEfektif||0;const o=(j+p)*gHJ(b);rA+=awal;rT+=t;rJ+=j;rK+=k;rL+=l;rP+=p;rO+=o;return`<tr><td><span class="tag ${BT[b]}">${BL[b]}</span></td><td>${fN(awal)}</td><td style="color:var(--green)">+${fN(t)}</td><td>${fN(j)}</td><td style="font-weight:700">${fN(k)}</td><td style="color:var(--red)">${l>0?'-'+fN(l)+' 🔒':'—'}</td><td style="color:var(--purple)">${p>0?'+'+fN(p)+' 🔒':'—'}</td><td>${fR(o)}</td></tr>`;}).join('');
+
+  // ── Running stok historis ─────────────────────────────────
+  const runRows=getRunningStok();
+  const runTableRows=runRows.slice().reverse().map((r,i)=>{
+    const isLatest=i===0;
+    return`<tr style="${isLatest?'font-weight:600;background:var(--surface2)':''}">
+      <td>${r.tanggal}${isLatest?` <span class="pill pill-ok" style="font-size:10px">Terkini</span>`:''}</td>
+      <td>${r.hari||'—'}</td>
+      ${BBM.map(b=>`<td style="text-align:right;color:${r.stokAkhir[b]<=0?'var(--red)':r.stokAkhir[b]<=BATAS[b]?'var(--amber)':'inherit'}">${fN(r.stokAkhir[b])}</td>`).join('')}
+    </tr>`;
+  }).join('');
+
+  // ── Audit stok terkini ────────────────────────────────────
+  const sis=getStokSistemTerkini();
+  const auditFormRows=BBM.map(b=>`
+    <tr>
+      <td><span class="tag ${BT[b]}">${BL[b]}</span></td>
+      <td style="text-align:right;font-weight:600">${fN(sis[b])} ltr</td>
+      <td><input type="text" id="audit-fisik-${b}" class="inp inp-num" placeholder="0" style="width:100px" oninput="hitungSelisihAudit()"></td>
+      <td id="audit-sel-${b}" style="text-align:right;font-weight:700">—</td>
+      <td id="audit-ket-${b}" style="font-size:11px">—</td>
+    </tr>`).join('');
+
+  // ── Histori audit tersimpan ───────────────────────────────
+  const auditHistRows=(state.auditStok||[]).slice().reverse().slice(0,10).map(a=>{
+    const selHtml=BBM.map(b=>{
+      const sel=a.selisih?.[b]||0;
+      return`<span class="tag ${BT[b]}" style="font-size:10px;margin-right:2px">${BL[b]}: ${sel>=0?'+':''}${fN(sel)}</span>`;
+    }).join('');
+    return`<tr>
+      <td>${a.tanggal}</td>
+      <td style="font-size:11px">${a.catatan||'—'}</td>
+      <td>${selHtml}</td>
+      <td style="font-size:11px;color:var(--text3)">${a.waktu||''}</td>
+    </tr>`;
+  }).join('');
+
+  main.innerHTML=`<div class="page-header"><div class="page-title">Stok BBM</div><div class="page-sub">Data terakhir: ${fd.tanggal} (${fd.hari})</div></div>
+  <div class="g4">
+    <div class="metric"><div class="metric-label">Stok Awal (Hari Ini)</div><div class="metric-value c-blue">${fN(tA)}</div><div class="metric-sub">liter catatan</div></div>
+    <div class="metric"><div class="metric-label">Total Penjualan</div><div class="metric-value">${fN(tJ)}</div><div class="metric-sub">liter terjual</div></div>
+    <div class="metric"><div class="metric-label">Penambahan</div><div class="metric-value c-green">+${fN(tT)}</div><div class="metric-sub">liter masuk</div></div>
+    <div class="metric"><div class="metric-label">Stok Akhir Efektif</div><div class="metric-value">${fN(tK)}</div><div class="metric-sub">liter tersisa</div></div>
+  </div>
+  <div class="g4" style="margin-top:-8px">
+    <div class="metric"><div class="metric-label">Losses</div><div class="metric-value c-red">${tL>0?'-'+fN(tL)+' ltr':'0'}</div><div class="metric-sub">🔒 terkunci</div></div>
+    <div class="metric"><div class="metric-label">Nilai Losses</div><div class="metric-value c-red">${tLRp>0?'-'+fR(tLRp):'-Rp 0'}</div></div>
+    <div class="metric"><div class="metric-label">Plus</div><div class="metric-value c-purple">${tP>0?'+'+fN(tP)+' ltr':'0'}</div><div class="metric-sub">🔒 terkunci</div></div>
+    <div class="metric"><div class="metric-label">Nilai Plus</div><div class="metric-value c-purple">${tPRp>0?'+'+fR(tPRp):'+Rp 0'}</div></div>
+  </div>
+
+  <!-- ═══ AUDIT STOK ═══ -->
+  <div class="card">
+    <div class="card-title">🔍 Audit Stok Fisik
+      <span style="font-size:11px;font-weight:400;color:var(--text3);margin-left:8px">Bandingkan stok fisik vs sistem — rekam selisih</span>
+    </div>
+    <div class="nt nt-i" style="font-size:12px;margin-bottom:12px">
+      Stok sistem = stok akhir efektif dari data tersimpan terakhir. Masukkan hasil hitung fisik untuk setiap BBM, lalu simpan audit.
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th style="text-align:left">BBM</th>
+          <th style="text-align:right">Stok Sistem (ltr)</th>
+          <th>Stok Fisik (input)</th>
+          <th style="text-align:right">Selisih (ltr)</th>
+          <th>Status</th>
+        </tr></thead>
+        <tbody>${auditFormRows}</tbody>
+      </table>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap">
+      <input type="date" id="audit-tanggal" style="border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px;font-size:13px;background:var(--surface);color:var(--text1)">
+      <input type="text" id="audit-catatan" placeholder="Catatan audit (opsional)" style="flex:1;min-width:160px;border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px;font-size:13px;background:var(--surface);color:var(--text1)">
+      <button class="btn btn-save" onclick="simpanAudit()">💾 Simpan Audit</button>
+    </div>
+    ${(state.auditStok||[]).length>0?`
+    <div style="margin-top:18px">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em">Histori Audit (10 Terakhir)</div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Tanggal</th><th>Catatan</th><th>Selisih per BBM</th><th>Waktu</th></tr></thead>
+        <tbody>${auditHistRows}</tbody>
+      </table></div>
+    </div>`:''}
+  </div>
+
+  <!-- ═══ RUNNING STOK ═══ -->
+  <div class="card">
+    <div class="card-title">📈 Histori Stok Kumulatif
+      <span style="font-size:11px;font-weight:400;color:var(--text3);margin-left:8px">Stok akhir efektif tiap hari — terakumulasi otomatis</span>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr>
+        <th>Tanggal</th><th>Hari</th>
+        ${BBM.map(b=>`<th style="text-align:right"><span class="tag ${BT[b]}">${BL[b]}</span></th>`).join('')}
+      </tr></thead>
+      <tbody>${runTableRows||'<tr><td colspan="6" class="empty-state">Belum ada data.</td></tr>'}</tbody>
+    </table></div>
+  </div>
+
+  <!-- ═══ PER SHIFT DATA ═══ -->
+  <div class="card">
+    <div class="card-title">Stok Per Shift — ${fd.tanggal}<div class="snav" style="margin:0">${shiftNavBtns}</div></div>
+    ${shiftViews}
+  </div>
+  <div class="card">
+    <div class="card-title">Ringkasan Per BBM</div>
+    <div class="tbl-wrap"><table><thead><tr><th style="text-align:left">BBM</th><th>Stok Awal</th><th>Tambah</th><th>Jual</th><th>Stok Akhir</th><th style="color:var(--red)">Losses 🔒</th><th style="color:var(--purple)">Plus 🔒</th><th>Omzet</th></tr></thead><tbody>${rrows}</tbody><tfoot><tr><td>Total</td><td>${fN(rA)}</td><td>+${fN(rT)}</td><td>${fN(rJ)}</td><td>${fN(rK)}</td><td>${rL>0?'-'+fN(rL):'—'}</td><td>${rP>0?'+'+fN(rP):'—'}</td><td>${fR(rO)}</td></tr></tfoot></table></div>
+  </div>`;
+
+  // Set default tanggal audit ke hari ini
+  const auditTgl=e('audit-tanggal');
+  if(auditTgl&&!auditTgl.value){const t=new Date();auditTgl.value=`${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;}
+}
+
+function hitungSelisihAudit(){
+  function getStokSistemTerkini(){
+    const sorted=[...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+    const res={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+    if(!sorted.length)return res;
+    const d=sorted[sorted.length-1];const ac=d.shifts;
+    BBM.forEach(b=>{res[b]=d.shiftData[ac[ac.length-1]]?.[b]?.stokAkhirEfektif||0;});
+    return res;
+  }
+  const sis=getStokSistemTerkini();
+  BBM.forEach(b=>{
+    const fisikEl=e(`audit-fisik-${b}`);
+    const selEl=e(`audit-sel-${b}`);
+    const ketEl=e(`audit-ket-${b}`);
+    if(!fisikEl||!selEl||!ketEl)return;
+    const fisikRaw=fisikEl.value.replace(/\./g,'');
+    if(fisikRaw===''){selEl.textContent='—';ketEl.textContent='—';return;}
+    const fisik=parseInt(fisikRaw)||0;
+    const sel=fisik-sis[b];
+    selEl.textContent=(sel>=0?'+':'')+fN(sel)+' ltr';
+    selEl.style.color=sel===0?'var(--green)':sel>0?'var(--purple)':'var(--red)';
+    if(sel===0){ketEl.innerHTML='<span class="bx bk">Sesuai ✓</span>';}
+    else if(sel>0){ketEl.innerHTML=`<span class="bx bp">Lebih +${fN(sel)} ltr</span>`;}
+    else{ketEl.innerHTML=`<span class="bx bl">Kurang ${fN(Math.abs(sel))} ltr</span>`;}
+  });
+}
+
+function simpanAudit(){
+  function getStokSistemTerkini(){
+    const sorted=[...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+    const res={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+    if(!sorted.length)return res;
+    const d=sorted[sorted.length-1];const ac=d.shifts;
+    BBM.forEach(b=>{res[b]=d.shiftData[ac[ac.length-1]]?.[b]?.stokAkhirEfektif||0;});
+    return res;
+  }
+  const tanggal=e('audit-tanggal')?.value||'';
+  const catatan=e('audit-catatan')?.value||'';
+  if(!tanggal){toast('Pilih tanggal audit!');return;}
+  const sis=getStokSistemTerkini();
+  const fisik={};const selisih={};
+  let adaInput=false;
+  BBM.forEach(b=>{
+    const v=parseInt((e(`audit-fisik-${b}`)?.value||'').replace(/\./g,''))||0;
+    fisik[b]=v;selisih[b]=v-sis[b];
+    if(e(`audit-fisik-${b}`)?.value.trim())adaInput=true;
+  });
+  if(!adaInput){toast('Masukkan minimal 1 stok fisik!');return;}
+  if(!state.auditStok)state.auditStok=[];
+  state.auditStok.unshift({
+    tanggal,catatan,fisik,sistem:{...sis},selisih,
+    waktu:new Date().toLocaleTimeString('id',{hour:'2-digit',minute:'2-digit'}),
+    savedAt:new Date().toISOString()
+  });
+  state.auditStok=state.auditStok.slice(0,100);
+  dbSave();
+  toast('✓ Audit stok '+tanggal+' tersimpan!');
+  renderStokPage(e('main-content'));
+}
+
+function switchSV(btn,targetId){
+  const parent=btn.closest('.card');if(!parent)return;
+  parent.querySelectorAll('.snavbtn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
+  parent.querySelectorAll('[id^="sv-"]').forEach(el=>el.style.display='none');
+  const v=e(targetId);if(v)v.style.display='block';
+}
+
+// ════════════════════════════════════════════════════════════
+// PAGE: KEUNTUNGAN
+// ════════════════════════════════════════════════════════════
+function renderLabaPage(main){
+  const fd=state.savedData[0];
+  if(!fd){main.innerHTML=`<div class="page-header"><div class="page-title">Keuntungan</div></div><div class="card"><div class="empty-state">Belum ada data tersimpan.</div></div>`;return;}
+  const ac=fd.shifts;let tV=0,tO=0,tL=0;
+  // Gunakan hargaSnapshot jika ada (harga yang berlaku saat data disimpan)
+  const hSnap=fd.hargaSnapshot||null;
+  const getHJ=b=>hSnap?(hSnap[b]||gHJ(b)):getHargaPadaTanggal(fd.tanggal,b).hj;
+  const getHPP=b=>hSnap?(hSnap['hpp_'+b]||gHPP(b)):getHargaPadaTanggal(fd.tanggal,b).hpp;
+  const hargaNote=hSnap?`<div class="nt nt-s" style="margin-bottom:12px;font-size:12px">✓ Keuntungan dihitung menggunakan harga yang berlaku pada <strong>${fd.tanggal}</strong> (snapshot tersimpan).</div>`:`<div class="nt nt-w" style="margin-bottom:12px;font-size:12px">⚠ Tidak ada snapshot harga untuk tanggal ini — menggunakan harga aktif saat ini.</div>`;
+  const rows=BBM.map(b=>{let j=0,p=0;ac.forEach(sh=>{const d=fd.shiftData[sh]?.[b]||{};j+=d.jual||0;p+=d.plus||0;});const vol=j+p,hj=getHJ(b),hpp=getHPP(b),m=hj-hpp;const o=vol*hj,l=vol*m;tV+=vol;tO+=o;tL+=l;return`<tr><td><span class="tag ${BT[b]}">${BL[b]}</span>${p>0?` <span class="bx bp">+${fN(p)} 🔒</span>`:''}</td><td>${fN(vol)}</td><td>Rp ${fN(hj)}</td><td>Rp ${fN(hpp)}</td><td>${fR(o)}</td><td style="color:${m>=0?'var(--green)':'var(--red)'};font-weight:600">${m>=0?'+':''}${fRF(m)}</td><td style="color:${l>=0?'var(--green)':'var(--red)'};font-weight:700">${fRF(l)}</td></tr>`;}).join('');
+  const biayaDetail=fd.biayaItems&&fd.biayaItems.length?fd.biayaItems.map(item=>{const c=CATS[item.cat]||CATS.lainnya;return`<div class="rrow"><span class="rl" style="display:flex;align-items:center;gap:8px"><span class="cat-badge" style="background:${c.bg};color:${c.color}">${c.label}</span>${esc(item.ket)}</span><span class="rv">Rp ${fN(item.nom)}</span></div>`;}).join(''):'<div class="empty-state" style="padding:12px">Tidak ada biaya operasional tercatat.</div>';
+  main.innerHTML=`<div class="page-header"><div class="page-title">Keuntungan</div><div class="page-sub">Data terakhir: ${fd.tanggal} (${fd.hari})</div></div>
+  ${hargaNote}
+  <div class="g4">
+    <div class="metric"><div class="metric-label">Total Volume</div><div class="metric-value c-blue">${fN(tV)}</div><div class="metric-sub">liter terjual</div></div>
+    <div class="metric"><div class="metric-label">Omzet Kotor</div><div class="metric-value">${fR(tO)}</div></div>
+    <div class="metric"><div class="metric-label">Laba Kotor</div><div class="metric-value ${tL>=0?'c-green':'c-red'}">${fR(tL)}</div></div>
+    <div class="metric"><div class="metric-label">Laba Bersih</div><div class="metric-value ${fd.labaBersih>=0?'c-green':'c-red'}">${fR(fd.labaBersih)}</div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Rincian Per BBM <span style="font-size:11px;color:var(--text3);font-weight:400">— harga berlaku ${fd.tanggal}</span></div>
+    <div class="tbl-wrap"><table><thead><tr><th style="text-align:left">BBM</th><th>Volume</th><th>Harga Jual</th><th>HPP</th><th>Omzet</th><th>Margin/ltr</th><th>Laba BBM</th></tr></thead><tbody>${rows}</tbody><tfoot><tr><td>Total</td><td>${fN(tV)}</td><td>—</td><td>—</td><td>${fR(tO)}</td><td>—</td><td style="color:${tL>=0?'var(--green)':'var(--red)'}">${fRF(tL)}</td></tr></tfoot></table></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Komponen Laba Bersih</div>
+    <div style="margin-bottom:12px">${biayaDetail}</div>
+    <div class="sep"></div>
+    <div class="rrow"><span class="rl">Laba Kotor (margin)</span><span class="rv" style="color:${tL>=0?'var(--green)':'var(--red)'}">${fRF(tL)}</span></div>
+    <div class="rrow"><span class="rl">Total Biaya Operasional</span><span class="rv" style="color:var(--red)">-${fRF(fd.ops)}</span></div>
+    <div class="rrow"><span class="rl" style="color:var(--red)">Kerugian Losses 🔒</span><span class="rv" style="color:var(--red)">${fd.tLRp>0?'-'+fRF(fd.tLRp):'-Rp 0'}</span></div>
+    <div class="rrow"><span class="rl" style="color:var(--purple)">Keuntungan Plus 🔒</span><span class="rv" style="color:var(--purple)">${fd.tPRp>0?'+'+fRF(fd.tPRp):'+Rp 0'}</span></div>
+    <div class="rrow tot"><span>Laba Bersih</span><span style="font-size:18px;font-weight:800;color:${fd.labaBersih>=0?'var(--green)':'var(--red)'}">${fRF(fd.labaBersih)}</span></div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════
+// PAGE: LOSSES & PLUS
+// ════════════════════════════════════════════════════════════
+function renderSelisihPage(main){
+  const fd=state.savedData[0];
+  if(!fd){main.innerHTML=`<div class="page-header"><div class="page-title">Losses & Plus</div></div><div class="card"><div class="empty-state">Belum ada data tersimpan.</div></div>`;return;}
+  const ac=fd.shifts;let tLL=0,tLRp=0,tPL=0,tPRp=0;
+  BBM.forEach(b=>{const _hj2=fd.hargaSnapshot?fd.hargaSnapshot[b]:gHJ(b);const _hpp2=fd.hargaSnapshot?fd.hargaSnapshot['hpp_'+b]:gHPP(b);const _mg2=_hj2-_hpp2;ac.forEach(sh=>{const d=fd.shiftData[sh]?.[b]||{};tLL+=d.losses||0;tLRp+=(d.losses||0)*_mg2;tPL+=d.plus||0;tPRp+=(d.plus||0)*_mg2;});});
+  const shiftNavBtns=ac.map((sh,i)=>`<button class="snavbtn${i===0?' active':''}" onclick="switchSV(this,'sev-${sh}')">${cap(sh)}</button>`).join('');
+  const shiftViews=ac.map((sh,i)=>{
+    const rows=BBM.map(b=>{const d=fd.shiftData[sh]?.[b]||{};const l=d.losses||0,p=d.plus||0;const lRp=l*gHJ(b),pRp=p*gHJ(b);const rumusL=l>0?`${fN(d.awal)}−${fN(d.jual)}=${fN(l)}`:'—';const rumusP=p>0?`${fN(d.jual)}−${fN(d.awal)}=${fN(p)}`:'—';const jenis=d.isLocked&&d.lockType==='losses'?'<span class="bx bl">Losses 🔒</span>':d.isLocked&&d.lockType==='plus'?'<span class="bx bp">Plus 🔒</span>':'<span class="bx bk">Normal</span>';return`<tr><td><span class="tag ${BT[b]}">${BL[b]}</span></td><td>${fN(d.awal||0)}</td><td>${fN(d.jual||0)}</td><td>${fN(d.tambah||0)}</td><td style="font-weight:700">${fN(d.stokAkhirEfektif||0)}</td><td>${jenis}</td><td style="color:var(--red);font-size:11px">${rumusL}</td><td style="color:var(--red);font-weight:700">${l>0?'-'+fN(l)+' 🔒':'—'}</td><td style="color:var(--red)">${l>0?'-'+fRF(lRp):'—'}</td><td style="color:var(--purple);font-size:11px">${rumusP}</td><td style="color:var(--purple);font-weight:700">${p>0?'+'+fN(p)+' 🔒':'—'}</td><td style="color:var(--purple)">${p>0?'+'+fRF(pRp):'—'}</td></tr>`;}).join('');
+    return`<div id="sev-${sh}" style="display:${i===0?'block':'none'}"><div class="tbl-wrap"><table><thead><tr><th style="text-align:left">BBM</th><th>Awal</th><th>Jual</th><th>Tambah</th><th>Stok Akhir</th><th>Status</th><th style="color:var(--red)">Rumus Losses</th><th style="color:var(--red)">Losses 🔒</th><th style="color:var(--red)">Nilai</th><th style="color:var(--purple)">Rumus Plus</th><th style="color:var(--purple)">Plus 🔒</th><th style="color:var(--purple)">Nilai</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }).join('');
+  main.innerHTML=`<div class="page-header"><div class="page-title">Losses & Plus</div><div class="page-sub">Selisih stok catatan vs aktual — terkunci setelah dihitung</div></div>
+  <div class="g2">
+    <div style="background:var(--red-bg);border:1px solid var(--red-light);border-radius:var(--radius-lg);padding:20px;border-left:4px solid var(--red)">
+      <div style="font-size:14px;font-weight:700;color:var(--red);margin-bottom:6px">▲ LOSSES 🔒</div>
+      <div style="font-size:11px;color:var(--red);opacity:.8;margin-bottom:10px">Rumus: Stok Awal − Penjualan</div>
+      <div style="font-size:28px;font-weight:800;color:var(--red)">${tLL>0?'-'+fN(tLL)+' ltr':'0 ltr'}</div>
+      <div style="font-size:13px;font-weight:600;color:var(--red);margin-top:6px">${tLL>0?'-'+fRF(tLRp):'-Rp 0'}</div>
+    </div>
+    <div style="background:var(--purple-bg);border:1px solid var(--purple-light);border-radius:var(--radius-lg);padding:20px;border-left:4px solid var(--purple)">
+      <div style="font-size:14px;font-weight:700;color:var(--purple);margin-bottom:6px">↑ PLUS 🔒</div>
+      <div style="font-size:11px;color:var(--purple);opacity:.8;margin-bottom:10px">Rumus: Penjualan − Stok Awal</div>
+      <div style="font-size:28px;font-weight:800;color:var(--purple)">${tPL>0?'+'+fN(tPL)+' ltr':'0 ltr'}</div>
+      <div style="font-size:13px;font-weight:600;color:var(--purple);margin-top:6px">${tPL>0?'+'+fRF(tPRp):'+Rp 0'}</div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Detail Per Shift<div class="snav" style="margin:0">${shiftNavBtns}</div></div>
+    ${shiftViews}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════
+// PAGE: HISTORI
+// ════════════════════════════════════════════════════════════
+function renderHistoriPage(main){
+  if(!state.savedData.length){main.innerHTML=`<div class="page-header"><div class="page-title">Histori</div></div><div class="card"><div class="empty-state">Belum ada data tersimpan.</div></div>`;return;}
+  const rows=state.savedData.map((d,i)=>{
+    const badges=d.shifts.map(s=>`<span class="bx ${s==='pagi'?'bk':s==='siang'?'bw':'bp'}" style="font-size:10px">${cap(s)}</span>`).join('');
+    return`<div class="hist-row">
+      <div style="font-weight:600">${d.tanggal}</div>
+      <div>${badges}</div>
+      <div style="text-align:right">${fR(d.totalOmzet)}</div>
+      <div style="text-align:right;font-weight:700;color:${d.labaBersih>=0?'var(--green)':'var(--red)'}">${fRF(d.labaBersih)}</div>
+      <div style="text-align:center;display:flex;gap:4px;justify-content:center">
+        <button class="btn btn-ghost btn-sm" onclick="loadData(${i})" title="Muat data ke form input" style="font-size:10px;padding:3px 8px">📥 Muat</button>
+        <button class="btn btn-ghost btn-sm" onclick="editTanggal(${i})" title="Ubah tanggal" style="font-size:10px;padding:3px 8px">📅 Edit Tgl</button>
+        <button class="btn btn-del btn-sm" onclick="hapusData(${i})" title="Hapus data ini" style="font-size:10px;padding:3px 8px">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
+  const labs=[...state.savedData].reverse().map(d=>d.tanggal.slice(5));
+  const vals=[...state.savedData].reverse().map(d=>d.labaBersih);
+  main.innerHTML=`<div class="page-header"><div class="page-title">Histori</div><div class="page-sub">${state.savedData.length} data tersimpan</div></div>
+  <div class="card">
+    <div class="card-title">Tren Laba Bersih<div><button class="btn btn-reset btn-sm" onclick="if(confirm('Hapus semua histori?')){state.savedData=[];dbSave();showPage('histori');toast('Histori dihapus.')}">Hapus Semua</button></div></div>
+    <div class="chart-wrap"><canvas id="histChart"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Riwayat Data</div>
+    <div class="hist-row" style="padding-bottom:8px">
+      <div class="hist-head">Tanggal</div><div class="hist-head">Shift</div>
+      <div class="hist-head" style="text-align:right">Omzet</div>
+      <div class="hist-head" style="text-align:right">Laba Bersih</div>
+      <div class="hist-head" style="text-align:center">Aksi</div>
+    </div>
+    ${rows}
+  </div>`;
+  const ctx=e('histChart');
+  if(ctx&&window.Chart){
+    if(histChartInst)histChartInst.destroy();
+    histChartInst=new Chart(ctx,{type:'bar',data:{labels:labs,datasets:[{label:'Laba bersih',data:vals,backgroundColor:vals.map(v=>v>=0?'rgba(45,106,45,.75)':'rgba(163,45,45,.75)'),borderRadius:5,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fRF(c.parsed.y)}}},scales:{x:{ticks:{font:{size:11}},grid:{display:false}},y:{ticks:{font:{size:11},callback:v=>fR(v)}}}}});
+  }
+}
+
+// ── Edit tanggal data yang salah ─────────────────────────────
+function editTanggal(i){
+  const d=state.savedData[i];if(!d)return;
+  const tglBaru=prompt(
+    'Ubah tanggal untuk data ini:\n\nTanggal saat ini: '+d.tanggal+'\n\nMasukkan tanggal baru (format: YYYY-MM-DD):',
+    d.tanggal
+  );
+  if(!tglBaru)return;
+  // Validasi format
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(tglBaru)){
+    toast('⚠ Format tanggal salah! Gunakan format: YYYY-MM-DD (contoh: 2026-06-03)');
+    return;
+  }
+  // Cek apakah tanggal baru sudah ada
+  const existing=state.savedData.find((x,idx)=>x.tanggal===tglBaru&&idx!==i);
+  if(existing){
+    if(!confirm('Sudah ada data untuk tanggal '+tglBaru+'. Data lama akan ditimpa. Lanjutkan?'))return;
+    // Hapus data lama di tanggal tujuan
+    state.savedData=state.savedData.filter((x,idx)=>!(x.tanggal===tglBaru&&idx!==i));
+  }
+  const hariList=['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
+  const hariStr=hariList[new Date(tglBaru+'T00:00:00').getDay()];
+  state.savedData[i].tanggal=tglBaru;
+  state.savedData[i].hari=hariStr;
+  // Re-sort
+  state.savedData.sort((a,b)=>a.tanggal>b.tanggal?-1:1);
+  dbSave();
+  // Sync ke Firebase
+  if(_fbInited){
+    fbSaveDay(state.savedData.find(x=>x.tanggal===tglBaru)).catch(()=>{});
+    // Hapus data lama dari Firebase jika tanggal berbeda
+    if(d.tanggal!==tglBaru){
+      _fbDb.ref(FB_ROOT+'/data/'+d.tanggal).remove().catch(()=>{});
+    }
+  }
+  toast('✓ Tanggal berhasil diubah ke '+tglBaru);
+  renderHistoriPage(e('main-content'));
+}
+
+// ── Hapus satu data ───────────────────────────────────────────
+function hapusData(i){
+  const d=state.savedData[i];if(!d)return;
+  if(!confirm('Hapus data tanggal '+d.tanggal+'?\n\nTindakan ini tidak bisa dibatalkan.\nData di Firebase juga akan dihapus.'))return;
+  state.savedData.splice(i,1);
+  dbSave();
+  // Hapus dari Firebase
+  if(_fbInited){
+    _fbDb.ref(FB_ROOT+'/data/'+d.tanggal).remove().catch(()=>{});
+  }
+  toast('✓ Data '+d.tanggal+' berhasil dihapus.');
+  renderHistoriPage(e('main-content'));
+}
+
+function loadData(i){
+  const d=state.savedData[i];if(!d)return;
+  SO.forEach(sh=>state.shiftSaved[sh]=false);
+  state.sel={pagi:false,siang:false,malam:false};
+  d.shifts.forEach(sh=>state.sel[sh]=true);
+  if(d.biayaItems){state.biayaItems=[...d.biayaItems];state.biayaId=state.biayaItems.reduce((mx,i)=>Math.max(mx,i.id),0)+1;}
+  showPage('input');
+  setTimeout(()=>{
+    if(e('f-tanggal'))e('f-tanggal').value=d.tanggal;onTgl();
+    d.shifts.forEach(sh=>{BBM.forEach(b=>{
+      const sd=d.shiftData[sh][b];
+      const aEl=e(`${sh}-awal-${b}`);if(aEl&&!aEl.readOnly)aEl.value=sd.awal;
+      const jEl=e(`${sh}-jual-${b}`);if(jEl)jEl.value=sd.jual;
+      const tEl=e(`${sh}-tambah-${b}`);if(tEl)tEl.value=sd.tambah;
+      const hEl=e(`${sh}-habis-${b}`);if(hEl)hEl.checked=sd.habis||false;
+    });});
+    calcAll();renderBiaya();toast('Data '+d.tanggal+' dimuat!');
+  },100);
+}
+
+// ════════════════════════════════════════════════════════════
+// PAGE: HARGA BBM
+// ════════════════════════════════════════════════════════════
+// ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+// PAGE: REKAP & LAPORAN
+// ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+let rekapMode='bulanan'; // 'bulanan' | 'mingguan' | 'harian' | 'custom'
+let rekapChart1=null,rekapChart2=null,rekapChart3=null;
+
+function getRekapData(mode,filterVal){
+  const data=[...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+  if(!data.length)return{rows:[],summary:{}};
+
+  // Group by period
+  const groups={};
+  data.forEach(d=>{
+    let key;
+    const tgl=d.tanggal;
+    if(mode==='harian'){key=tgl;}
+    else if(mode==='mingguan'){
+      const dt=new Date(tgl+'T00:00:00');
+      const day=dt.getDay();
+      const mon=new Date(dt);mon.setDate(dt.getDate()-(day===0?6:day-1));
+      const sun=new Date(mon);sun.setDate(mon.getDate()+6);
+      key=`${mon.toISOString().slice(0,10)} s/d ${sun.toISOString().slice(0,10)}`;
+    }else if(mode==='bulanan'){
+      key=tgl.slice(0,7); // YYYY-MM
+    }else if(mode==='custom'){
+      key=tgl;
+    }
+    if(!groups[key])groups[key]={tanggals:[],records:[]};
+    groups[key].tanggals.push(tgl);
+    groups[key].records.push(d);
+  });
+
+  // Filter by period if needed
+  let filteredGroups=groups;
+  if(mode==='bulanan'&&filterVal){
+    filteredGroups={};
+    if(groups[filterVal])filteredGroups[filterVal]=groups[filterVal];
+  }else if(mode==='custom'&&filterVal&&filterVal.from&&filterVal.to){
+    filteredGroups={};
+    Object.keys(groups).forEach(k=>{
+      const inRange=groups[k].tanggals.some(t=>t>=filterVal.from&&t<=filterVal.to);
+      if(inRange)filteredGroups[k]=groups[k];
+    });
+  }
+
+  // Compute per group
+  const rows=Object.keys(filteredGroups).sort().reverse().map(key=>{
+    const recs=filteredGroups[key].records;
+    let omzet=0,labaKotor=0,biaya=0,labaBersih=0,jual=0,losses=0,plus=0,lossesRp=0,plusRp=0;
+    const bbmVol={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+    const bbmOmzet={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+    const bbmLaba={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+    const bbmLosses={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+    const bbmPlus={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+    recs.forEach(d=>{
+      omzet+=d.totalOmzet||0;
+      labaKotor+=d.totalMargin||0;
+      biaya+=d.ops||0;
+      labaBersih+=d.labaBersih||0;
+      jual+=d.totalJual||0;
+      lossesRp+=d.tLRp||0;
+      plusRp+=d.tPRp||0;
+      BBM.forEach(b=>{
+        d.shifts.forEach(sh=>{
+          const sd=d.shiftData[sh]?.[b]||{};
+          bbmVol[b]+=(sd.jual||0)+(sd.plus||0);
+          bbmLosses[b]+=sd.losses||0;
+          bbmPlus[b]+=sd.plus||0;
+          losses+=sd.losses||0;
+          plus+=sd.plus||0;
+        });
+        const hSnap=d.hargaSnapshot||null;
+        const hj=hSnap?hSnap[b]:getHargaPadaTanggal(d.tanggal,b).hj;
+        const hpp=hSnap?hSnap['hpp_'+b]:getHargaPadaTanggal(d.tanggal,b).hpp;
+        // Akumulasi per hari (+=) bukan overwrite
+        d.shifts.forEach(sh2=>{
+          const sd2=d.shiftData[sh2]?.[b]||{};
+          const vol2=(sd2.jual||0)+(sd2.plus||0);
+          bbmOmzet[b]+=vol2*hj;
+          bbmLaba[b]+=vol2*(hj-hpp);
+        });
+      });
+    });
+    const hariCount=recs.length;
+    return{key,hariCount,omzet,labaKotor,biaya,labaBersih,jual,losses,plus,lossesRp,plusRp,bbmVol,bbmOmzet,bbmLaba,bbmLosses,bbmPlus,recs};
+  });
+
+  // Total summary
+  const summary=rows.reduce((acc,r)=>{
+    acc.omzet+=r.omzet;acc.labaKotor+=r.labaKotor;acc.biaya+=r.biaya;
+    acc.labaBersih+=r.labaBersih;acc.jual+=r.jual;acc.losses+=r.losses;
+    acc.plus+=r.plus;acc.lossesRp+=r.lossesRp;acc.plusRp+=r.plusRp;
+    acc.hari+=r.hariCount;
+    BBM.forEach(b=>{acc.bbmVol[b]=(acc.bbmVol[b]||0)+r.bbmVol[b];});
+    return acc;
+  },{omzet:0,labaKotor:0,biaya:0,labaBersih:0,jual:0,losses:0,plus:0,lossesRp:0,plusRp:0,hari:0,bbmVol:{pertalite:0,pertamax:0,dexlite:0,biosolar:0}});
+
+  return{rows,summary,groups};
+}
+
+
+// ═══════════════════════════════════════════════════════
+//  LAPORAN PENJUALAN HARIAN
+// ═══════════════════════════════════════════════════════
+let laporanTgl = '';
+
+function renderLaporanPage(main){
+  if(!main)return;
+  // Default: tanggal hari ini atau tanggal terakhir yang ada datanya
+  const today = new Date().toISOString().slice(0,10);
+  if(!laporanTgl){
+    const last = [...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?-1:1)[0];
+    laporanTgl = last ? last.tanggal : today;
+  }
+
+  const rec = state.savedData.find(d=>d.tanggal===laporanTgl);
+
+  // Daftar tanggal tersedia untuk navigasi
+  const tglList = [...state.savedData].map(d=>d.tanggal).sort().reverse();
+
+  if(!state.savedData.length){
+    main.innerHTML=`<div class="page-header"><div class="page-title">📰 Laporan Penjualan Harian</div></div>
+    <div class="card"><div class="empty-state">Belum ada data tersimpan.</div></div>`;
+    return;
+  }
+
+  // ── Hitung data per shift ──────────────────────────────
+  const SHIFTS = ['pagi','siang','malam'];
+  const shiftLabel = {pagi:'Pagi',siang:'Siang',malam:'Malam'};
+  const shiftTime  = {pagi:'06.00–14.00',siang:'14.00–22.00',malam:'22.00–06.00'};
+  const shiftColor = {pagi:'#2D6A2D',siang:'#185FA5',malam:'#534AB7'};
+  const shiftBg    = {pagi:'#EAF3DE',siang:'#E6F1FB',malam:'#EEEDFE'};
+
+  // Data hari ini
+  let hariIni = { total:{jual:0,omzet:0,laba:0,losses:0,lossesRp:0,plus:0}, shifts:{}, bbm:{} };
+  BBM.forEach(b=>{ hariIni.bbm[b]={jual:0,omzet:0,laba:0,losses:0,plus:0,shifts:{pagi:0,siang:0,malam:0}}; });
+  SHIFTS.forEach(sh=>{ hariIni.shifts[sh]={jual:0,omzet:0,laba:0,losses:0,lossesRp:0,plus:0,bbm:{}}; BBM.forEach(b=>{hariIni.shifts[sh].bbm[b]={jual:0,laba:0,losses:0};}); });
+
+  if(rec){
+    rec.shifts.forEach(sh=>{
+      const hSnap=rec.hargaSnapshot||null;
+      BBM.forEach(b=>{
+        const sd=rec.shiftData[sh]?.[b]||{};
+        const hj=hSnap?hSnap[b]:gHJ(b);
+        const hpp=hSnap?hSnap['hpp_'+b]:gHPP(b);
+        const margin=hj-hpp;
+        const jual=sd.jual||0; const losses=sd.losses||0; const plus=sd.plus||0;
+        const omzet=jual*hj; const laba=jual*margin;
+        const lossesRp=losses*margin;
+        hariIni.shifts[sh].jual+=jual; hariIni.shifts[sh].omzet+=omzet;
+        hariIni.shifts[sh].laba+=laba; hariIni.shifts[sh].losses+=losses;
+        hariIni.shifts[sh].lossesRp+=lossesRp; hariIni.shifts[sh].plus+=plus;
+        hariIni.shifts[sh].bbm[b]={jual,laba,losses,omzet,plus,hj,hpp};
+        hariIni.bbm[b].jual+=jual; hariIni.bbm[b].omzet+=omzet;
+        hariIni.bbm[b].laba+=laba; hariIni.bbm[b].losses+=losses;
+        hariIni.bbm[b].plus+=plus; hariIni.bbm[b].shifts[sh]=jual;
+        hariIni.total.jual+=jual; hariIni.total.omzet+=omzet;
+        hariIni.total.laba+=laba; hariIni.total.losses+=losses;
+        hariIni.total.lossesRp+=lossesRp; hariIni.total.plus+=plus;
+      });
+    });
+  }
+
+  // ── Analisa 30 hari (shift sering turun, anomali selisih) ──
+  const hist30 = [...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1).slice(-30);
+
+  // Rata-rata jual per shift (untuk deteksi shift turun)
+  const shiftAvg = {}; const shiftCount = {};
+  SHIFTS.forEach(sh=>{ shiftAvg[sh]=0; shiftCount[sh]=0; });
+  hist30.forEach(d=>{
+    d.shifts.forEach(sh=>{
+      const hSnap=d.hargaSnapshot||null;
+      let jual=0;
+      BBM.forEach(b=>{ jual+=(d.shiftData[sh]?.[b]?.jual||0); });
+      shiftAvg[sh]+=jual; shiftCount[sh]++;
+    });
+  });
+  SHIFTS.forEach(sh=>{ if(shiftCount[sh]>0)shiftAvg[sh]=shiftAvg[sh]/shiftCount[sh]; });
+  const minAvg = Math.min(...SHIFTS.map(sh=>shiftAvg[sh]||Infinity));
+  const shiftTurun = SHIFTS.filter(sh=>shiftAvg[sh]>0&&shiftAvg[sh]===minAvg);
+
+  // Anomali selisih: hari dengan losses > rata-rata + 2*stddev
+  let allLosses=[];
+  hist30.forEach(d=>{
+    let tot=0; d.shifts.forEach(sh=>{ BBM.forEach(b=>{ tot+=d.shiftData[sh]?.[b]?.losses||0; }); });
+    allLosses.push({tgl:d.tanggal,losses:tot});
+  });
+  const avgLosses = allLosses.reduce((s,x)=>s+x.losses,0)/Math.max(1,allLosses.length);
+  const stdLosses = Math.sqrt(allLosses.reduce((s,x)=>s+Math.pow(x.losses-avgLosses,2),0)/Math.max(1,allLosses.length));
+  const anomali = allLosses.filter(x=>x.losses>avgLosses+2*stdLosses).slice(-5);
+
+  // Produk paling menguntungkan (30 hari)
+  const bbmLabaHist = {};
+  BBM.forEach(b=>{ bbmLabaHist[b]=0; });
+  hist30.forEach(d=>{
+    const hSnap=d.hargaSnapshot||null;
+    BBM.forEach(b=>{
+      const hj=hSnap?hSnap[b]:gHJ(b);
+      const hpp=hSnap?hSnap['hpp_'+b]:gHPP(b);
+      d.shifts.forEach(sh=>{ bbmLabaHist[b]+=(d.shiftData[sh]?.[b]?.jual||0)*(hj-hpp); });
+    });
+  });
+  const bbmRank = [...BBM].sort((a,z)=>bbmLabaHist[z]-bbmLabaHist[a]);
+  const maxLaba = Math.max(...BBM.map(b=>bbmLabaHist[b]));
+
+  // ── Format tanggal Indonesia ──────────────────────────
+  const fTgl = t=>{ if(!t)return'—'; const [y,m,d]=t.split('-'); const B=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des']; return `${d} ${B[parseInt(m)-1]} ${y}`; };
+  const hari = t=>{ if(!t)return''; const H=['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu']; return H[new Date(t+'T00:00:00').getDay()]; };
+
+  // ── Navigasi prev/next ────────────────────────────────
+  const curIdx = tglList.indexOf(laporanTgl);
+  const prevTgl = curIdx<tglList.length-1?tglList[curIdx+1]:'';
+  const nextTgl = curIdx>0?tglList[curIdx-1]:'';
+
+  // ── Render ────────────────────────────────────────────
+  main.innerHTML=`
+  <div class="page-header">
+    <div>
+      <div class="page-title">📰 Laporan Penjualan Harian</div>
+      <div class="page-sub">Analisa penjualan, shift, dan selisih harian</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn btn-ghost btn-sm" onclick="printLaporan()">🖨 Print</button>
+    </div>
+  </div>
+
+  <!-- NAVIGATOR TANGGAL -->
+  <div class="card" style="padding:12px 16px">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" onclick="if('${prevTgl}'){laporanTgl='${prevTgl}';renderLaporanPage(e('main-content'));}" ${!prevTgl?'disabled':''}>← Sebelumnya</button>
+      <select class="inp" onchange="laporanTgl=this.value;renderLaporanPage(e('main-content'))" style="flex:1;max-width:220px;padding:6px 10px;font-size:13px;font-weight:600">
+        ${tglList.map(t=>`<option value="${t}" ${t===laporanTgl?'selected':''}>${hari(t)}, ${fTgl(t)}</option>`).join('')}
+      </select>
+      <button class="btn btn-ghost btn-sm" onclick="if('${nextTgl}'){laporanTgl='${nextTgl}';renderLaporanPage(e('main-content'));}" ${!nextTgl?'disabled':''}>Berikutnya →</button>
+      ${!rec?'<span style="color:var(--red);font-size:12px">⚠ Tidak ada data untuk tanggal ini</span>':''}
+    </div>
+  </div>
+
+  ${!rec?'':`
+  <!-- RINGKASAN HARI INI -->
+  <div class="g4" style="gap:12px;margin-bottom:12px">
+    <div class="card" style="padding:16px;border-top:3px solid var(--green)">
+      <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Total Terjual</div>
+      <div style="font-size:24px;font-weight:800;color:var(--text)">${fN(hariIni.total.jual)}</div>
+      <div style="font-size:12px;color:var(--text2)">liter</div>
+    </div>
+    <div class="card" style="padding:16px;border-top:3px solid var(--blue)">
+      <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Total Omzet</div>
+      <div style="font-size:20px;font-weight:800;color:var(--blue)">${fRF(hariIni.total.omzet)}</div>
+      <div style="font-size:12px;color:var(--text2)">pendapatan kotor</div>
+    </div>
+    <div class="card" style="padding:16px;border-top:3px solid var(--green)">
+      <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Laba Kotor</div>
+      <div style="font-size:20px;font-weight:800;color:var(--green)">${fRF(hariIni.total.laba)}</div>
+      <div style="font-size:12px;color:var(--text2)">${hariIni.total.omzet>0?(hariIni.total.laba/hariIni.total.omzet*100).toFixed(1):0}% margin</div>
+    </div>
+    <div class="card" style="padding:16px;border-top:3px solid ${hariIni.total.losses>0?'var(--red)':'var(--border)'}">
+      <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Losses</div>
+      <div style="font-size:20px;font-weight:800;color:${hariIni.total.losses>0?'var(--red)':'var(--text3)'}">${hariIni.total.losses>0?fN(hariIni.total.losses)+' ltr':'—'}</div>
+      <div style="font-size:12px;color:var(--red)">${hariIni.total.lossesRp>0?'-'+fRF(hariIni.total.lossesRp):''}</div>
+    </div>
+  </div>
+
+  <!-- TABEL PER SHIFT -->
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">Penjualan per Shift & Produk</div>
+    <div class="tbl-wrap">
+    <table class="stbl">
+      <thead>
+        <tr>
+          <th style="text-align:left">Shift</th>
+          <th style="text-align:left">Produk</th>
+          <th>Volume (ltr)</th>
+          <th>Harga Jual</th>
+          <th>Omzet</th>
+          <th>Margin/ltr</th>
+          <th>Laba</th>
+          <th>Losses</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      ${rec.shifts.map(sh=>{
+        const sd=hariIni.shifts[sh];
+        const rows=BBM.map((b,bi)=>{
+          const d=sd.bbm[b];
+          const margin=d.hj-(d.hpp||0);
+          const isLoss=d.losses>0;
+          return`<tr class="${isLoss?'row-losses':''}">
+            ${bi===0?`<td rowspan="${BBM.length}" style="font-weight:700;vertical-align:middle;text-align:center;background:${shiftBg[sh]};border-left:3px solid ${shiftColor[sh]}">
+              <div style="color:${shiftColor[sh]};font-size:13px">${shiftLabel[sh]}</div>
+              <div style="font-size:10px;color:var(--text3)">${shiftTime[sh]}</div>
+              <div style="font-size:12px;font-weight:800;color:${shiftColor[sh]};margin-top:4px">${fN(sd.jual)} ltr</div>
+            </td>`:''}
+            <td><span class="tag ${BT[b]}">${BL[b]}</span></td>
+            <td style="text-align:right;font-weight:600">${fN(d.jual)}</td>
+            <td style="text-align:right;font-size:12px">${fR(d.hj||0)}</td>
+            <td style="text-align:right;color:var(--blue)">${fRF(d.omzet)}</td>
+            <td style="text-align:right;font-size:12px;color:${margin>=0?'var(--green)':'var(--red)'}">${fR(margin)}</td>
+            <td style="text-align:right;color:var(--green);font-weight:600">${fRF(d.laba)}</td>
+            <td style="text-align:right;color:var(--red)">${d.losses>0?fN(d.losses)+' ltr':'—'}</td>
+            <td style="text-align:center">${d.losses>0?'<span class="bx bl">Losses</span>':d.plus>0?'<span class="bx bp">Plus</span>':'<span class="bx bk">OK</span>'}</td>
+          </tr>`;
+        }).join('');
+        const totalRow=`<tr style="background:${shiftBg[sh]};font-weight:700;border-top:2px solid ${shiftColor[sh]}">
+          <td colspan="2" style="color:${shiftColor[sh]}">Total ${shiftLabel[sh]}</td>
+          <td style="text-align:right">${fN(sd.jual)} ltr</td>
+          <td></td>
+          <td style="text-align:right;color:var(--blue)">${fRF(sd.omzet)}</td>
+          <td></td>
+          <td style="text-align:right;color:var(--green)">${fRF(sd.laba)}</td>
+          <td style="text-align:right;color:var(--red)">${sd.losses>0?fN(sd.losses)+' ltr':'—'}</td>
+          <td></td>
+        </tr>`;
+        return rows+totalRow;
+      }).join('<tr><td colspan="9" style="padding:4px;background:var(--surface2)"></td></tr>')}
+      <!-- TOTAL HARI -->
+      <tr style="background:var(--surface2);font-weight:800;border-top:3px solid var(--text);font-size:13px">
+        <td colspan="2" style="color:var(--text)">TOTAL HARI</td>
+        <td style="text-align:right">${fN(hariIni.total.jual)} ltr</td>
+        <td></td>
+        <td style="text-align:right;color:var(--blue)">${fRF(hariIni.total.omzet)}</td>
+        <td></td>
+        <td style="text-align:right;color:var(--green)">${fRF(hariIni.total.laba)}</td>
+        <td style="text-align:right;color:var(--red)">${hariIni.total.losses>0?fN(hariIni.total.losses)+' ltr':'—'}</td>
+        <td></td>
+      </tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- RINGKASAN PER PRODUK -->
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">Perbandingan Produk Hari Ini</div>
+    <div class="g4" style="gap:10px">
+    ${BBM.map(b=>{
+      const d=hariIni.bbm[b];
+      const margin=gHJ(b)-gHPP(b);
+      const isTop=b===bbmRank[0];
+      const pctVol=hariIni.total.jual>0?(d.jual/hariIni.total.jual*100):0;
+      return`<div class="card" style="padding:14px;border-top:3px solid var(--${BT[b]==='tag-p'?'green':BT[b]==='tag-x'?'blue':BT[b]==='tag-d'?'amber':'purple'});position:relative">
+        ${isTop?`<div style="position:absolute;top:8px;right:8px;background:var(--green);color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:20px">⭐ TERLARIS</div>`:''}
+        <div style="margin-bottom:10px"><span class="tag ${BT[b]}" style="font-size:12px">${BL[b]}</span></div>
+        <div style="font-size:22px;font-weight:800;color:var(--text);margin-bottom:2px">${fN(d.jual)}</div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:8px">liter (${pctVol.toFixed(1)}% total)</div>
+        <div style="height:6px;background:var(--surface2);border-radius:3px;margin-bottom:8px;overflow:hidden">
+          <div style="height:100%;width:${pctVol}%;background:var(--green);border-radius:3px"></div>
+        </div>
+        <div style="font-size:12px;color:var(--text2)">Omzet: <strong style="color:var(--blue)">${fRF(d.omzet)}</strong></div>
+        <div style="font-size:12px;color:var(--text2)">Margin: <strong style="color:var(--green)">${fR(margin)}/ltr</strong></div>
+        <div style="font-size:12px;color:var(--text2)">Laba: <strong style="color:var(--green)">${fRF(d.laba)}</strong></div>
+        ${d.losses>0?`<div style="font-size:11px;color:var(--red);margin-top:4px">⚠ Losses: ${fN(d.losses)} ltr</div>`:''}
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+          <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:4px">Per Shift</div>
+          ${['pagi','siang','malam'].map(sh=>`<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text2)"><span>${shiftLabel[sh]}</span><strong>${fN(d.shifts[sh])} ltr</strong></div>`).join('')}
+        </div>
+      </div>`;
+    }).join('')}
+    </div>
+  </div>`}
+
+  <!-- ═══ ANALISA 30 HARI ═══ -->
+  <div class="card-title" style="padding:16px 0 8px;font-size:14px;font-weight:800;color:var(--text)">📊 Analisa 30 Hari Terakhir (${hist30.length} hari data)</div>
+
+  <div class="g3" style="gap:12px;margin-bottom:12px">
+
+    <!-- ANALISA 1: Shift sering turun -->
+    <div class="card" style="padding:16px">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px;display:flex;align-items:center;gap:6px">
+        <span>📉 Shift Sering Rendah</span>
+      </div>
+      ${SHIFTS.map(sh=>{
+        const avg=shiftAvg[sh];
+        const maxA=Math.max(...SHIFTS.map(s=>shiftAvg[s]||0));
+        const pct=maxA>0?(avg/maxA*100):0;
+        const isMin=shiftTurun.includes(sh);
+        return`<div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span style="font-size:12px;font-weight:${isMin?700:500};color:${isMin?'var(--red)':'var(--text)'}">${shiftLabel[sh]} <span style="font-size:10px;color:var(--text3)">${shiftTime[sh]}</span></span>
+            <span style="font-size:12px;font-weight:700;color:${isMin?'var(--red)':'var(--text)'}">${fN(Math.round(avg))} ltr</span>
+          </div>
+          <div style="height:8px;background:var(--surface2);border-radius:4px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:${isMin?'var(--red)':'var(--green)'};border-radius:4px"></div>
+          </div>
+          ${isMin?`<div style="font-size:10px;color:var(--red);margin-top:2px">⚠ Rata-rata terendah</div>`:''}
+        </div>`;
+      }).join('')}
+      <div style="margin-top:10px;padding:8px 10px;background:var(--surface2);border-radius:var(--radius);font-size:11px;color:var(--text2)">
+        💡 Shift <strong style="color:var(--red)">${shiftTurun.map(s=>shiftLabel[s]).join(' & ')}</strong> konsisten paling rendah dalam 30 hari terakhir. Pertimbangkan rotasi tim atau promo khusus.
+      </div>
+    </div>
+
+    <!-- ANALISA 2: Selisih tidak normal -->
+    <div class="card" style="padding:16px">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px">⚠ Selisih Tidak Normal</div>
+      <div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+          <span style="color:var(--text2)">Rata-rata losses/hari</span>
+          <strong>${fN(Math.round(avgLosses))} ltr</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+          <span style="color:var(--text2)">Batas normal (±2σ)</span>
+          <strong>${fN(Math.round(avgLosses+2*stdLosses))} ltr</strong>
+        </div>
+      </div>
+      ${anomali.length===0
+        ?`<div style="padding:10px;background:var(--green-bg);border-radius:var(--radius);font-size:12px;color:var(--green);font-weight:600">✓ Tidak ada anomali selisih dalam 30 hari terakhir</div>`
+        :`<div style="font-size:11px;font-weight:700;color:var(--red);margin-bottom:6px">Hari dengan losses tidak normal:</div>
+        ${anomali.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--red-bg);border-radius:6px;margin-bottom:4px;font-size:12px">
+          <span style="font-weight:600">${fTgl(x.tgl)}</span>
+          <span style="color:var(--red);font-weight:700">${fN(x.losses)} ltr</span>
+        </div>`).join('')}
+        <div style="margin-top:8px;padding:8px 10px;background:var(--surface2);border-radius:var(--radius);font-size:11px;color:var(--text2)">
+          💡 Hari-hari ini perlu ditelusuri lebih lanjut — kemungkinan kesalahan input atau kebocoran fisik.
+        </div>`}
+    </div>
+
+    <!-- ANALISA 3: Produk paling menguntungkan -->
+    <div class="card" style="padding:16px">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px">⭐ Produk Paling Untung</div>
+      ${bbmRank.map((b,i)=>{
+        const laba=bbmLabaHist[b];
+        const pct=maxLaba>0?(laba/maxLaba*100):0;
+        const colors=['var(--green)','var(--blue)','var(--amber)','var(--text3)'];
+        const medals=['🥇','🥈','🥉','4️⃣'];
+        return`<div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span style="font-size:12px;font-weight:600">${medals[i]} <span class="tag ${BT[b]}">${BL[b]}</span></span>
+            <span style="font-size:12px;font-weight:700;color:${colors[i]}">${fRF(laba)}</span>
+          </div>
+          <div style="height:8px;background:var(--surface2);border-radius:4px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:${colors[i]};border-radius:4px"></div>
+          </div>
+        </div>`;
+      }).join('')}
+      <div style="margin-top:10px;padding:8px 10px;background:var(--surface2);border-radius:var(--radius);font-size:11px;color:var(--text2)">
+        💡 <strong class="tag ${BT[bbmRank[0]]}">${BL[bbmRank[0]]}</strong> menghasilkan laba terbesar dalam 30 hari terakhir. Pastikan stok selalu tersedia.
+      </div>
+    </div>
+  </div>
+  `;
+}
+
+function printLaporan(){
+  const d=document.querySelector('#main-content');
+  if(!d)return;
+  const w=window.open('','_blank','width=900,height=700');
+  w.document.write('<html><head><title>Laporan Harian</title><style>body{font-family:system-ui,sans-serif;font-size:12px;color:#111;padding:20px} table{width:100%;border-collapse:collapse} th,td{border:1px solid #ddd;padding:6px 8px;text-align:left} th{background:#f5f5f5;font-weight:700} .tag{padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700} .bx{padding:2px 6px;border-radius:4px;font-size:10px} @media print{button{display:none}}</style></head><body>'+d.innerHTML+'</body></html>');
+  w.document.close();
+  setTimeout(()=>w.print(),500);
+}
+
+
+
+
+// ═══════════════════════════════════════════════════════════════
+//  FORECAST STOK BBM
+//  Prediksi kapan stok habis berdasarkan rata-rata konsumsi
+// ═══════════════════════════════════════════════════════════════
+
+// Threshold alert (hari)
+const FORECAST_ALERT  = 3;   // ⚠ kurang dari 3 hari → waspada
+const FORECAST_KRITIS = 1;   // 🚨 kurang dari 1 hari → kritis
+
+let fcPeriode = 14; // periode kalkulasi rata-rata (7/14/30 hari)
+
+// ── Kalkulasi forecast per BBM ────────────────────────────────
+function hitungForecast(b, periode){
+  const sorted=[...state.savedData].sort((a,z)=>a.tanggal>z.tanggal?-1:1);
+  if(!sorted.length) return null;
+
+  // Stok saat ini = stok akhir efektif hari terakhir
+  const lastRec=sorted[0];
+  const lastShift=lastRec.shifts[lastRec.shifts.length-1];
+  const stokSaatIni=lastRec.shiftData[lastShift]?.[b]?.stokAkhirEfektif??null;
+  if(stokSaatIni===null) return null;
+
+  // Ambil data N hari terakhir untuk rata-rata
+  const dataPeriode=sorted.slice(0,periode);
+  if(!dataPeriode.length) return null;
+
+  // Rata-rata konsumsi per hari
+  let totalJual=0, totalHari=0, totalLosses=0;
+  dataPeriode.forEach(rec=>{
+    let jualHari=0, lossesHari=0;
+    rec.shifts.forEach(sh=>{
+      jualHari+=(rec.shiftData[sh]?.[b]?.jual||0);
+      lossesHari+=(rec.shiftData[sh]?.[b]?.losses||0);
+    });
+    totalJual+=jualHari;
+    totalLosses+=lossesHari;
+    totalHari++;
+  });
+
+  const rataHari=totalHari>0?totalJual/totalHari:0;
+  const rataLosses=totalHari>0?totalLosses/totalHari:0;
+  const rataTotal=rataHari+rataLosses; // konsumsi + losses
+
+  // Forecast hari
+  const hariSisa=rataTotal>0?(stokSaatIni/rataTotal):999;
+
+  // Perkiraan tanggal habis
+  const tglHabis=new Date();
+  tglHabis.setDate(tglHabis.getDate()+Math.floor(hariSisa));
+
+  // Tren: bandingkan 7 hari terakhir vs 7 hari sebelumnya
+  const recent=sorted.slice(0,7);
+  const older=sorted.slice(7,14);
+  let recentAvg=0,olderAvg=0;
+  recent.forEach(r=>{r.shifts.forEach(sh=>{recentAvg+=(r.shiftData[sh]?.[b]?.jual||0);});});
+  older.forEach(r=>{r.shifts.forEach(sh=>{olderAvg+=(r.shiftData[sh]?.[b]?.jual||0);});});
+  recentAvg=recent.length?recentAvg/recent.length:0;
+  olderAvg=older.length?olderAvg/older.length:rataHari;
+  const tren=olderAvg>0?((recentAvg-olderAvg)/olderAvg*100):0; // % naik/turun
+
+  // Volume per shift
+  const perShift={pagi:0,siang:0,malam:0};
+  dataPeriode.forEach(rec=>{
+    ['pagi','siang','malam'].forEach(sh=>{
+      perShift[sh]+=(rec.shiftData[sh]?.[b]?.jual||0);
+    });
+  });
+  ['pagi','siang','malam'].forEach(sh=>{perShift[sh]=totalHari>0?perShift[sh]/totalHari:0;});
+
+  // Hitung kebutuhan penerimaan (stok minimum 7 hari)
+  const stokMinimum=rataTotal*7;
+  const perluTerima=Math.max(0,stokMinimum-stokSaatIni);
+
+  return{
+    b, stokSaatIni, rataHari, rataLosses, rataTotal,
+    hariSisa, tglHabis, tren, perShift,
+    stokMinimum, perluTerima, totalHari,
+    status: hariSisa<FORECAST_KRITIS?'kritis':hariSisa<FORECAST_ALERT?'waspada':'aman'
+  };
+}
+
+// ── Render halaman forecast ───────────────────────────────────
+function renderForecastPage(main){
+  if(!main)return;
+  if(!state.savedData.length){
+    main.innerHTML=`<div class="page-header"><div class="page-title">📡 Forecast Stok BBM</div></div>
+    <div class="card"><div class="empty-state">Belum ada data tersimpan. Input minimal 3 hari data untuk forecast akurat.</div></div>`;
+    return;
+  }
+
+  const sorted=[...state.savedData].sort((a,z)=>a.tanggal>z.tanggal?-1:1);
+  const lastTgl=sorted[0].tanggal;
+  const bln=['Januari','Februari','Maret','April','Mei','Juni',
+             'Juli','Agustus','September','Oktober','November','Desember'];
+  const fTgl=t=>{if(!t)return'—';const[y,m,d]=t.split('-');return d+' '+bln[parseInt(m)-1]+' '+y;};
+  const fTglShort=t=>{if(!t)return'—';const[y,m,d]=t.split('-');return d+'/'+m;};
+
+  // Hitung forecast semua BBM
+  const forecasts=BBM.map(b=>hitungForecast(b,fcPeriode)).filter(Boolean);
+
+  // Alert level keseluruhan
+  const adaKritis=forecasts.some(f=>f.status==='kritis');
+  const adaWaspada=forecasts.some(f=>f.status==='waspada');
+
+  // Chart data: konsumsi 14 hari terakhir per BBM
+  const chartDays=sorted.slice(0,14).reverse();
+
+  main.innerHTML=`
+  <div class="page-header">
+    <div>
+      <div class="page-title">📡 Forecast Stok BBM</div>
+      <div class="page-sub">Prediksi kehabisan stok · Data per ${fTgl(lastTgl)}</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span style="font-size:12px;color:var(--text2)">Basis rata-rata:</span>
+      <div class="snav" style="margin:0">
+        ${[7,14,30].map(n=>`<button class="snav-btn${fcPeriode===n?' active':''}"
+          onclick="fcPeriode=${n};renderForecastPage(e('main-content'))">${n} hari</button>`).join('')}
+      </div>
+    </div>
+  </div>
+
+  <!-- Alert Banner -->
+  ${adaKritis?`<div style="background:var(--red);color:#fff;padding:14px 18px;border-radius:var(--radius);margin-bottom:12px;display:flex;align-items:center;gap:12px">
+    <span style="font-size:24px">🚨</span>
+    <div><div style="font-weight:700;font-size:14px">STOK KRITIS — Segera Pesan BBM!</div>
+    <div style="font-size:12px;opacity:.9;margin-top:2px">${forecasts.filter(f=>f.status==='kritis').map(f=>BL[f.b]+' tersisa kurang dari 1 hari').join(' · ')}</div></div>
+  </div>`:''}
+  ${!adaKritis&&adaWaspada?`<div style="background:var(--amber);color:#fff;padding:12px 18px;border-radius:var(--radius);margin-bottom:12px;display:flex;align-items:center;gap:12px">
+    <span style="font-size:20px">⚠</span>
+    <div><div style="font-weight:700;font-size:13px">Stok Mendekati Batas — Rencanakan Pemesanan</div>
+    <div style="font-size:12px;opacity:.9;margin-top:2px">${forecasts.filter(f=>f.status==='waspada').map(f=>BL[f.b]+': '+Math.ceil(f.hariSisa)+' hari lagi').join(' · ')}</div></div>
+  </div>`:''}
+  ${!adaKritis&&!adaWaspada?`<div style="background:var(--green-bg);border:1px solid var(--green-light);padding:10px 16px;border-radius:var(--radius);margin-bottom:12px;font-size:12px;color:var(--green);font-weight:600">
+    ✓ Semua stok aman — tidak ada yang mendekati batas dalam ${FORECAST_ALERT} hari ke depan
+  </div>`:''}
+
+  <!-- Kartu Forecast per BBM -->
+  <div class="g4" style="gap:12px;margin-bottom:16px">
+  ${forecasts.map(f=>{
+    const statusColor=f.status==='kritis'?'var(--red)':f.status==='waspada'?'var(--amber)':'var(--green)';
+    const statusBg=f.status==='kritis'?'var(--red-bg)':f.status==='waspada'?'var(--amber-bg)':'var(--green-bg)';
+    const statusIcon=f.status==='kritis'?'🚨':f.status==='waspada'?'⚠':'✓';
+    const hariSisaRound=Math.floor(f.hariSisa);
+    const hariLabel=f.hariSisa>=999?'Sangat lama':hariSisaRound+' hari '+Math.round((f.hariSisa%1)*24)+' jam';
+    const pctBar=Math.min(100,Math.max(0,(f.hariSisa/30)*100));
+    const tren=f.tren;
+    const trenIcon=tren>5?'📈':tren<-5?'📉':'➡';
+    const trenColor=tren>5?'var(--green)':tren<-5?'var(--red)':'var(--text2)';
+    return`<div class="card" style="padding:16px;border-top:4px solid ${statusColor};position:relative">
+      <!-- Status badge -->
+      <div style="position:absolute;top:12px;right:12px;background:${statusBg};color:${statusColor};
+        font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;border:1px solid ${statusColor}">
+        ${statusIcon} ${f.status.toUpperCase()}
+      </div>
+
+      <!-- Nama BBM -->
+      <span class="tag ${BT[f.b]}" style="font-size:12px;margin-bottom:10px;display:inline-block">${BL[f.b]}</span>
+
+      <!-- Hari sisa - besar -->
+      <div style="margin:8px 0 4px">
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em">Tersisa</div>
+        <div style="font-size:28px;font-weight:900;color:${statusColor};line-height:1.1">${f.hariSisa>=999?'∞':hariSisaRound}</div>
+        <div style="font-size:12px;color:${statusColor};font-weight:600">${f.hariSisa>=999?'cukup lama':'hari lagi'}</div>
+      </div>
+
+      <!-- Progress bar hari sisa -->
+      <div style="height:6px;background:var(--surface2);border-radius:3px;margin:10px 0;overflow:hidden">
+        <div style="height:100%;width:${pctBar}%;background:${statusColor};border-radius:3px;
+          transition:width .5s"></div>
+      </div>
+
+      <!-- Info stok -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">
+        <div style="background:var(--surface2);padding:8px;border-radius:6px">
+          <div style="font-size:10px;color:var(--text3);text-transform:uppercase">Stok Saat Ini</div>
+          <div style="font-size:14px;font-weight:700">${fN(f.stokSaatIni)}</div>
+          <div style="font-size:10px;color:var(--text3)">liter</div>
+        </div>
+        <div style="background:var(--surface2);padding:8px;border-radius:6px">
+          <div style="font-size:10px;color:var(--text3);text-transform:uppercase">Konsumsi/hari</div>
+          <div style="font-size:14px;font-weight:700">${fN(Math.round(f.rataTotal))}</div>
+          <div style="font-size:10px;color:var(--text3)">ltr (rata-rata ${f.totalHari} hari)</div>
+        </div>
+      </div>
+
+      <!-- Perkiraan habis -->
+      <div style="background:${statusBg};border-radius:6px;padding:8px 10px;margin-bottom:10px">
+        <div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Perkiraan Habis</div>
+        <div style="font-size:13px;font-weight:700;color:${statusColor}">${f.hariSisa>=999?'Tidak dalam waktu dekat':fTgl(f.tglHabis.toISOString().slice(0,10))}</div>
+      </div>
+
+      <!-- Tren & per shift -->
+      <div style="font-size:11px;color:var(--text2);display:flex;justify-content:space-between;align-items:center">
+        <span>Tren 7 hari: <strong style="color:${trenColor}">${trenIcon} ${Math.abs(tren).toFixed(0)}%${tren>0?' naik':tren<0?' turun':' stabil'}</strong></span>
+        ${f.perluTerima>0?`<span style="color:var(--amber);font-weight:600;font-size:11px">⬆ Perlu ${fN(Math.ceil(f.perluTerima))} ltr</span>`:'<span style="color:var(--green)">✓ Stok cukup</span>'}
+      </div>
+    </div>`;
+  }).join('')}
+  </div>
+
+  <!-- Detail Analisa -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+
+    <!-- Tabel detail -->
+    <div class="card">
+      <div class="card-title">📊 Ringkasan Forecast</div>
+      <table class="stbl" style="font-size:12px">
+        <thead><tr>
+          <th>Produk</th>
+          <th style="text-align:right">Stok</th>
+          <th style="text-align:right">Rata/hari</th>
+          <th style="text-align:right">Sisa</th>
+          <th style="text-align:right">Habis</th>
+          <th style="text-align:right">Perlu Tambah</th>
+        </tr></thead>
+        <tbody>
+        ${forecasts.map(f=>{
+          const statusColor=f.status==='kritis'?'var(--red)':f.status==='waspada'?'var(--amber)':'var(--green)';
+          return`<tr>
+            <td><span class="tag ${BT[f.b]}" style="font-size:10px">${BL[f.b]}</span></td>
+            <td style="text-align:right">${fN(f.stokSaatIni)} ltr</td>
+            <td style="text-align:right">${fN(Math.round(f.rataTotal))} ltr</td>
+            <td style="text-align:right;font-weight:700;color:${statusColor}">
+              ${f.hariSisa>=999?'∞':Math.floor(f.hariSisa)+' hari'}
+            </td>
+            <td style="text-align:right;font-size:11px;color:${statusColor}">
+              ${f.hariSisa>=999?'—':fTgl(f.tglHabis.toISOString().slice(0,10))}
+            </td>
+            <td style="text-align:right;color:${f.perluTerima>0?'var(--amber)':'var(--green)'};font-weight:600">
+              ${f.perluTerima>0?fN(Math.ceil(f.perluTerima))+' ltr':'✓ Cukup'}
+            </td>
+          </tr>`;
+        }).join('')}
+        </tbody>
+      </table>
+
+      <!-- Penjelasan metode -->
+      <div style="margin-top:10px;padding:8px 12px;background:var(--surface2);border-radius:var(--radius);font-size:11px;color:var(--text2);line-height:1.7">
+        <strong>Metode kalkulasi:</strong><br>
+        Stok saat ini ÷ (Rata-rata jual + losses per hari selama ${fcPeriode} hari)<br>
+        <em>Perlu Tambah</em> = volume agar stok aman untuk 7 hari ke depan
+      </div>
+    </div>
+
+    <!-- Breakdown per shift -->
+    <div class="card">
+      <div class="card-title">⏰ Konsumsi Rata-rata per Shift</div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+      ${forecasts.map(f=>{
+        const total=f.perShift.pagi+f.perShift.siang+f.perShift.malam;
+        const shiftColor={pagi:'var(--green)',siang:'var(--blue)',malam:'var(--purple)'};
+        const shiftLabel={pagi:'Pagi',siang:'Siang',malam:'Malam'};
+        return`<div>
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+            <span class="tag ${BT[f.b]}" style="font-size:10px">${BL[f.b]}</span>
+            <span style="font-size:11px;color:var(--text2)">${fN(Math.round(total))} ltr/hari total</span>
+          </div>
+          ${['pagi','siang','malam'].map(sh=>{
+            const vol=f.perShift[sh];
+            const pct=total>0?(vol/total*100):0;
+            return`<div style="margin-bottom:4px">
+              <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px">
+                <span style="color:${shiftColor[sh]}">${shiftLabel[sh]}</span>
+                <span>${fN(Math.round(vol))} ltr (${pct.toFixed(0)}%)</span>
+              </div>
+              <div style="height:5px;background:var(--surface2);border-radius:3px;overflow:hidden">
+                <div style="height:100%;width:${pct}%;background:${shiftColor[sh]};border-radius:3px"></div>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>`;
+      }).join('')}
+      </div>
+    </div>
+  </div>
+
+  <!-- Grafik konsumsi 14 hari -->
+  <div class="card">
+    <div class="card-title">📈 Tren Konsumsi ${chartDays.length} Hari Terakhir</div>
+    <div style="overflow-x:auto">
+    <div style="min-width:600px">
+    ${BBM.map(b=>{
+      const maxVal=Math.max(...chartDays.map(d=>{let j=0;d.shifts.forEach(sh=>{j+=d.shiftData[sh]?.[b]?.jual||0;});return j;}),1);
+      const rataF=forecasts.find(f=>f.b===b);
+      const rata=rataF?rataF.rataHari:0;
+      return`<div style="margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span class="tag ${BT[b]}" style="font-size:10px">${BL[b]}</span>
+          <span style="font-size:11px;color:var(--text2)">Rata-rata: ${fN(Math.round(rata))} ltr/hari</span>
+          <div style="flex:1;height:1px;background:var(--border);margin:0 4px"></div>
+        </div>
+        <div style="display:flex;align-items:flex-end;gap:3px;height:60px;background:var(--surface2);
+          border-radius:6px;padding:6px;position:relative">
+          <!-- Garis rata-rata -->
+          <div style="position:absolute;left:6px;right:6px;bottom:${6+(rata/maxVal*48)}px;
+            border-top:1px dashed var(--amber);pointer-events:none"></div>
+          ${chartDays.map(d=>{
+            let jual=0;d.shifts.forEach(sh=>{jual+=d.shiftData[sh]?.[b]?.jual||0;});
+            const h=Math.max(2,Math.round((jual/maxVal)*48));
+            const isAbove=jual>rata*1.2;const isBelow=jual<rata*0.8;
+            const col=isAbove?'var(--green)':isBelow?'var(--red)':'var(--blue)';
+            return`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">
+              <div style="font-size:8px;color:var(--text3);writing-mode:vertical-rl;transform:rotate(180deg)">
+                ${fTglShort(d.tanggal)}
+              </div>
+              <div style="width:100%;height:${h}px;background:${col};border-radius:2px 2px 0 0;
+                margin-top:auto" title="${fTgl(d.tanggal)}: ${fN(jual)} ltr"></div>
+            </div>`;
+          }).join('')}
+        </div>
+        <div style="display:flex;gap:10px;margin-top:4px;font-size:10px">
+          <span>■ <span style="color:var(--green)">Di atas rata-rata</span></span>
+          <span>■ <span style="color:var(--blue)">Normal</span></span>
+          <span>■ <span style="color:var(--red)">Di bawah rata-rata</span></span>
+          <span>– – <span style="color:var(--amber)">Rata-rata</span></span>
+        </div>
+      </div>`;
+    }).join('')}
+    </div>
+    </div>
+  </div>
+  `;
+}
+
+// ── Alert forecast di dashboard (dipanggil saat load) ─────────
+function getForecastAlerts(){
+  if(!state.savedData.length) return [];
+  return BBM.map(b=>hitungForecast(b,14))
+    .filter(Boolean)
+    .filter(f=>f.status!=='aman');
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════
+//  LAPORAN PEMBELIAN BBM
+//  Analisa modal, perputaran, dan proyeksi kebutuhan
+// ═══════════════════════════════════════════════════════════════
+let lbFilter = ''; // YYYY-MM
+
+function renderLapBeliPage(main){
+  if(!main)return;
+  const now=new Date();
+  const bulanIni=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+  if(!lbFilter)lbFilter=bulanIni;
+
+  const bln=['Januari','Februari','Maret','April','Mei','Juni',
+             'Juli','Agustus','September','Oktober','November','Desember'];
+  const LB=v=>{if(!v)return'—';const[y,m]=v.split('-');return bln[parseInt(m)-1]+' '+y;};
+  const fTgl=t=>{if(!t)return'—';const[y,m,d]=t.split('-');return d+' '+bln[parseInt(m)-1].slice(0,3)+' '+y;};
+
+  // Daftar bulan tersedia
+  const bulanSet=new Set([bulanIni]);
+  (state.penerimaan||[]).forEach(p=>{if(p.tanggal)bulanSet.add(p.tanggal.slice(0,7));});
+  const bulanList=[...bulanSet].sort().reverse();
+
+  // ── Data penerimaan bulan ini (dari modul Penerimaan BBM) ──
+  const penBulan=(state.penerimaan||[])
+    .filter(p=>p.tanggal&&p.tanggal.slice(0,7)===lbFilter)
+    .sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+
+  // ── Agregasi dari Penerimaan BBM (DO resmi) ────────────────
+  const perBBM={};
+  BBM.forEach(b=>perBBM[b]={volume:0,nilai:0,dos:0,hargaRata:0,dariShift:0,nilaiShift:0});
+  let totalModal=0,totalVolume=0;
+
+  penBulan.forEach(p=>{
+    BBM.forEach(b=>{
+      if(p.detail?.[b]?.volume>0){
+        perBBM[b].volume+=p.detail[b].volume;
+        perBBM[b].nilai+=p.detail[b].nilai||0;
+        perBBM[b].dos++;
+      }
+    });
+    totalModal+=(p.totalNilai||BBM.reduce((s,b)=>s+(p.detail?.[b]?.nilai||0),0));
+  });
+
+  // ── Tambah dari data tambah shift (fallback/pelengkap) ─────
+  // Harga beli (HPP) = Harga Jual - Margin
+  const penjBulanAll=(state.savedData||[]).filter(d=>d.tanggal.slice(0,7)===lbFilter);
+  penjBulanAll.forEach(rec=>{
+    const hSnap=rec.hargaSnapshot||null;
+    BBM.forEach(b=>{
+      rec.shifts.forEach(sh=>{
+        const sd=rec.shiftData[sh]?.[b]||{};
+        const tambahMid=sd.tambah||0;       // tambah mid-shift
+        const tambahNorm=sd.tambahNormal||0; // tambah normal
+        const totalTambah=tambahMid+tambahNorm;
+        if(totalTambah>0){
+          const hpp=hSnap?hSnap['hpp_'+b]:gHPP(b);
+          perBBM[b].dariShift+=totalTambah;
+          perBBM[b].nilaiShift+=totalTambah*hpp;
+        }
+      });
+    });
+  });
+
+  // Jika tidak ada data Penerimaan BBM, gunakan data shift sebagai estimasi
+  BBM.forEach(b=>{
+    if(perBBM[b].volume===0&&perBBM[b].dariShift>0){
+      perBBM[b].volume=perBBM[b].dariShift;
+      perBBM[b].nilai=perBBM[b].nilaiShift;
+      // tandai sebagai estimasi
+      perBBM[b].isEstimasi=true;
+    }
+    if(perBBM[b].volume===0&&perBBM[b].dariShift>0)
+      totalModal+=perBBM[b].nilaiShift;
+  });
+  // Hitung ulang totalModal jika ada campuran
+  totalModal=BBM.reduce((s,b)=>s+perBBM[b].nilai,0);
+
+  BBM.forEach(b=>{
+    totalVolume+=perBBM[b].volume;
+    perBBM[b].hargaRata=perBBM[b].volume>0?Math.round(perBBM[b].nilai/perBBM[b].volume):0;
+  });
+
+  // Apakah ada data yang menggunakan estimasi shift
+  const adaEstimasi=BBM.some(b=>perBBM[b].isEstimasi);
+  const semuaDariShift=penBulan.length===0&&BBM.some(b=>perBBM[b].dariShift>0);
+
+  // ── Analisa penjualan bulan ini untuk perputaran modal ────
+  const penjBulan=(state.savedData||[]).filter(d=>d.tanggal.slice(0,7)===lbFilter);
+  let totalOmzetBulan=0,totalLabaKotorBulan=0;
+  const volJualBBM={};BBM.forEach(b=>volJualBBM[b]=0);
+  penjBulan.forEach(rec=>{
+    totalOmzetBulan+=rec.totalOmzet||0;
+    const hSnap=rec.hargaSnapshot||null;
+    BBM.forEach(b=>{
+      rec.shifts.forEach(sh=>{
+        const jual=rec.shiftData[sh]?.[b]?.jual||0;
+        volJualBBM[b]+=jual;
+        const hj=hSnap?hSnap[b]:gHJ(b);
+        const hpp=hSnap?hSnap['hpp_'+b]:gHPP(b);
+        totalLabaKotorBulan+=jual*(hj-hpp);
+      });
+    });
+  });
+
+  // ── Kalkulasi perputaran modal ────────────────────────────
+  const ROI=totalModal>0?(totalLabaKotorBulan/totalModal*100):0;
+  const hariKerja=penjBulan.length||1;
+  const modalPerHari=totalModal/Math.max(penBulan.length||1,1);
+
+  // ── Rata-rata pembelian per DO ────────────────────────────
+  const totalDO=penBulan.length;
+  const modalPerDO=totalDO>0?totalModal/totalDO:0;
+
+  // ── Proyeksi bulan depan (berdasarkan tren) ───────────────
+  // Rata-rata volume jual per hari × 30 hari × HPP rata-rata
+  const volHariRata=BBM.reduce((s,b)=>s+volJualBBM[b],0)/hariKerja;
+  const hppRata=BBM.reduce((s,b)=>{
+    const v=volJualBBM[b];const hpp=gHPP(b);return s+v*hpp;
+  },0)/Math.max(BBM.reduce((s,b)=>s+volJualBBM[b],0),1);
+  const proyeksiModalBulanDepan=volHariRata*30*hppRata;
+
+  // ── Rekap per bulan (semua periode) ──────────────────────
+  const allBulan=[...new Set((state.penerimaan||[]).map(p=>p.tanggal?.slice(0,7)).filter(Boolean))].sort().reverse();
+
+  main.innerHTML=`
+  <div class="page-header">
+    <div>
+      <div class="page-title">💰 Laporan Pembelian BBM</div>
+      <div class="page-sub">Analisa modal, perputaran, dan proyeksi kebutuhan</div>
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="printLapBeli('${lbFilter}')">🖨 Print</button>
+  </div>
+
+  <!-- Filter -->
+  <div class="card" style="padding:12px 16px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-size:12px;font-weight:700;color:var(--text2)">PERIODE:</span>
+      <select class="inp" onchange="lbFilter=this.value;renderLapBeliPage(e('main-content'))"
+        style="width:180px;padding:5px 10px;font-size:13px;font-weight:600">
+        ${bulanList.map(b=>`<option value="${b}" ${b===lbFilter?'selected':''}>${LB(b)}</option>`).join('')}
+      </select>
+      <div style="margin-left:auto;font-size:12px;color:var(--text2)">
+        ${penBulan.length} kali pembelian · ${totalDO} DO
+      </div>
+    </div>
+    ${semuaDariShift?`<div style="margin-top:8px;padding:7px 12px;background:var(--amber-bg);border-radius:var(--radius);font-size:11px;color:var(--amber)">
+      ⚡ <strong>Data dari Tambah Stok (Estimasi)</strong> — Belum ada data Penerimaan BBM bulan ini.
+      Modal dihitung dari volume tambah shift × HPP (Harga Jual - Margin).
+      <a href="#" onclick="showPage('penerimaan');return false" style="color:var(--blue);margin-left:4px">→ Input Penerimaan BBM untuk data akurat</a>
+    </div>`:adaEstimasi?`<div style="margin-top:8px;padding:7px 12px;background:var(--surface2);border-radius:var(--radius);font-size:11px;color:var(--text2)">
+      ℹ Sebagian data menggunakan estimasi dari tambah stok (HPP = Harga Jual - Margin)
+    </div>`:''}
+  </div>
+
+  <!-- KPI Modal -->
+  <div class="g4" style="gap:10px;margin-bottom:12px">
+    ${[
+      {l:'Total Modal Pembelian',v:fRF(totalModal),s:totalVolume?fN(totalVolume)+' ltr total':'-',c:'var(--red)',icon:'💸'},
+      {l:'Modal per DO',v:fRF(modalPerDO),s:totalDO+' kali pembelian',c:'var(--amber)',icon:'📋'},
+      {l:'Laba Kotor dari Modal',v:fRF(totalLabaKotorBulan),s:'ROI '+ROI.toFixed(1)+'%',c:'var(--green)',icon:'📈'},
+      {l:'Proyeksi Modal Bulan Depan',v:fRF(proyeksiModalBulanDepan),s:'basis '+hariKerja+' hari data',c:'var(--blue)',icon:'🔮'},
+    ].map(c=>`<div class="card" style="padding:14px;border-top:3px solid ${c.c}">
+      <div style="font-size:18px;margin-bottom:6px">${c.icon}</div>
+      <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">${c.l}</div>
+      <div style="font-size:16px;font-weight:800;color:${c.c}">${c.v}</div>
+      <div style="font-size:11px;color:var(--text2);margin-top:4px">${c.s}</div>
+    </div>`).join('')}
+  </div>
+
+  <!-- Analisa Perputaran Modal -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+
+    <!-- Per Produk -->
+    <div class="card">
+      <div class="card-title">📦 Rincian per Produk — ${LB(lbFilter)}</div>
+      ${perBBM&&Object.values(perBBM).some(v=>v.volume>0)?`
+      <table class="stbl" style="font-size:12px">
+        <thead><tr>
+          <th>Produk</th>
+          <th style="text-align:right">Volume Masuk</th>
+          <th style="text-align:right">HPP/ltr</th>
+          <th style="text-align:right">Total Modal</th>
+          <th style="text-align:right">Volume Jual</th>
+          <th style="text-align:right">Sisa Stok</th>
+          <th style="text-align:center">Sumber</th>
+        </tr></thead>
+        <tbody>
+        ${BBM.map(b=>{
+          if(!perBBM[b].volume&&!volJualBBM[b])return'';
+          const sisaLtr=perBBM[b].volume-volJualBBM[b];
+          const sisaNilai=sisaLtr*gHPP(b);
+          const terjual=perBBM[b].volume>0?(volJualBBM[b]/perBBM[b].volume*100):0;
+          return`<tr>
+            <td><span class="tag ${BT[b]}" style="font-size:11px">${BL[b]}</span></td>
+            <td style="text-align:right">${fN(perBBM[b].volume)} ltr</td>
+            <td style="text-align:right;font-size:11px">${fN(perBBM[b].hargaRata||gHPP(b))}</td>
+            <td style="text-align:right;color:var(--red);font-weight:600">${fRF(perBBM[b].nilai||perBBM[b].volume*gHPP(b))}</td>
+            <td style="text-align:right">${fN(volJualBBM[b])} ltr
+              <div style="height:3px;background:var(--surface2);border-radius:2px;margin-top:3px">
+                <div style="width:${Math.min(100,terjual).toFixed(0)}%;height:100%;background:var(--green);border-radius:2px"></div>
+              </div>
+            </td>
+            <td style="text-align:right;color:${sisaLtr<0?'var(--red)':sisaLtr<500?'var(--amber)':'var(--text)'}">
+              ${fN(Math.max(0,sisaLtr))} ltr<br>
+              <span style="font-size:10px;color:var(--text3)">${fRF(Math.max(0,sisaNilai))}</span>
+            </td>
+            <td style="text-align:center;font-size:10px">
+              ${perBBM[b].isEstimasi
+                ?'<span style="color:var(--amber)" title="Estimasi dari tambah stok">⚡ Estimasi</span>'
+                :'<span style="color:var(--green)" title="Dari data Penerimaan BBM">✓ DO</span>'}
+            </td>
+          </tr>`;
+        }).join('')}
+        </tbody>
+        <tfoot><tr style="background:var(--surface2);font-weight:700">
+          <td>TOTAL</td>
+          <td style="text-align:right">${fN(totalVolume)} ltr</td>
+          <td></td>
+          <td style="text-align:right;color:var(--red)">${fRF(totalModal)}</td>
+          <td style="text-align:right">${fN(BBM.reduce((s,b)=>s+volJualBBM[b],0))} ltr</td>
+          <td></td>
+        </tr></tfoot>
+      </table>`
+      :`<div class="empty-state" style="padding:20px">Belum ada data pembelian ${LB(lbFilter)}.<br>
+        <a href="#" onclick="showPage('penerimaan');return false" style="color:var(--blue);font-size:12px">→ Input Penerimaan BBM</a>
+      </div>`}
+    </div>
+
+    <!-- Analisa Modal -->
+    <div class="card">
+      <div class="card-title">🔄 Analisa Perputaran Modal</div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+
+        <div style="background:var(--green-bg);border:1px solid var(--green-light);border-radius:var(--radius);padding:12px">
+          <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:8px">📊 Return on Investment (ROI)</div>
+          <div style="font-size:24px;font-weight:900;color:var(--green)">${ROI.toFixed(1)}%</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:4px">
+            Laba Kotor ${fRF(totalLabaKotorBulan)} ÷ Modal ${fRF(totalModal)}
+          </div>
+          <div style="height:8px;background:var(--surface2);border-radius:4px;margin-top:8px;overflow:hidden">
+            <div style="width:${Math.min(100,ROI*5).toFixed(0)}%;height:100%;background:var(--green);border-radius:4px"></div>
+          </div>
+        </div>
+
+        <div style="background:var(--blue-bg);border:1px solid var(--blue-light);border-radius:var(--radius);padding:12px">
+          <div style="font-size:11px;font-weight:700;color:var(--blue);margin-bottom:6px">⏱ Estimasi Perputaran</div>
+          <div style="font-size:13px;font-weight:700">${totalModal>0&&totalOmzetBulan>0?(totalModal/totalOmzetBulan*30).toFixed(1)+' hari':'—'}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:2px">Modal kembali dalam estimasi X hari</div>
+        </div>
+
+        <div style="background:var(--amber-bg);border:1px solid var(--amber-light);border-radius:var(--radius);padding:12px">
+          <div style="font-size:11px;font-weight:700;color:var(--amber);margin-bottom:6px">💰 Proyeksi Modal Bulan Depan</div>
+          <div style="font-size:18px;font-weight:800;color:var(--amber)">${fRF(proyeksiModalBulanDepan)}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:4px">
+            ~${fN(Math.round(volHariRata))} ltr/hari × 30 hari × HPP rata-rata
+          </div>
+        </div>
+
+        <div style="background:var(--surface2);border-radius:var(--radius);padding:12px">
+          <div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px">📋 Rekomendasi Modal per DO</div>
+          ${BBM.map(b=>{
+            const volHariB=volJualBBM[b]/hariKerja;
+            const modalPerDoB=volHariB*7*gHPP(b); // 7 hari stok aman
+            if(!modalPerDoB)return'';
+            return`<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;border-bottom:1px solid var(--border)">
+              <span><span class="tag ${BT[b]}" style="font-size:10px">${BL[b]}</span></span>
+              <span style="font-weight:600">${fRF(modalPerDoB)}</span>
+            </div>`;
+          }).join('')}
+          <div style="font-size:10px;color:var(--text3);margin-top:6px">*Modal untuk stok 7 hari per produk</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- List Produk Masuk Harian -->
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">📥 List Produk Masuk Harian — ${LB(lbFilter)}</div>
+
+    ${(()=>{
+      // Kumpulkan semua penambahan stok dari data shift per hari
+      const hariMasuk={};
+      penjBulanAll.forEach(rec=>{
+        const tgl=rec.tanggal;
+        if(!hariMasuk[tgl])hariMasuk[tgl]={tanggal:tgl,hari:rec.hari||'',midShift:{},normal:{},total:{}};
+        BBM.forEach(b=>{
+          if(!hariMasuk[tgl].midShift[b])hariMasuk[tgl].midShift[b]=0;
+          if(!hariMasuk[tgl].normal[b])hariMasuk[tgl].normal[b]=0;
+          if(!hariMasuk[tgl].total[b])hariMasuk[tgl].total[b]=0;
+          rec.shifts.forEach(sh=>{
+            const sd=rec.shiftData[sh]?.[b]||{};
+            hariMasuk[tgl].midShift[b]+=(sd.tambah||0);
+            hariMasuk[tgl].normal[b]+=(sd.tambahNormal||0);
+          });
+          hariMasuk[tgl].total[b]=hariMasuk[tgl].midShift[b]+hariMasuk[tgl].normal[b];
+        });
+      });
+
+      const rows=Object.values(hariMasuk)
+        .filter(d=>BBM.some(b=>d.total[b]>0))
+        .sort((a,z)=>a.tanggal>z.tanggal?1:-1);
+
+      if(!rows.length)return`<div class="empty-state">
+        Tidak ada penambahan stok di ${LB(lbFilter)}.<br>
+        <span style="font-size:11px;color:var(--text3)">Data diambil dari field "Tambah Mid-Shift" dan "Tambah Normal" di Input Data</span>
+      </div>`;
+
+      // Total per produk seluruh bulan
+      const totalMidBulan={};const totalNormalBulan={};const grandTotal={};
+      BBM.forEach(b=>{totalMidBulan[b]=0;totalNormalBulan[b]=0;grandTotal[b]=0;});
+      rows.forEach(d=>{BBM.forEach(b=>{
+        totalMidBulan[b]+=d.midShift[b];
+        totalNormalBulan[b]+=d.normal[b];
+        grandTotal[b]+=d.total[b];
+      });});
+
+      return`
+      <!-- Ringkasan per Produk -->
+      <div class="g4" style="gap:8px;margin-bottom:12px">
+        ${BBM.map(b=>{
+          const tot=grandTotal[b];
+          const nilaiEst=tot*gHPP(b);
+          if(!tot)return`<div class="card" style="padding:10px;opacity:.4;border-top:3px solid var(--border)">
+            <span class="tag ${BT[b]}" style="font-size:11px">${BL[b]}</span>
+            <div style="font-size:13px;color:var(--text3);margin-top:6px">Tidak ada masuk</div>
+          </div>`;
+          return`<div class="card" style="padding:10px;border-top:3px solid var(--blue)">
+            <span class="tag ${BT[b]}" style="font-size:11px">${BL[b]}</span>
+            <div style="font-size:20px;font-weight:800;margin-top:6px">${fN(tot)}</div>
+            <div style="font-size:11px;color:var(--text2)">liter masuk bulan ini</div>
+            <div style="font-size:12px;color:var(--amber);margin-top:4px;font-weight:600">${fRF(nilaiEst)}</div>
+            <div style="font-size:10px;color:var(--text3);margin-top:2px">
+              Mid: ${fN(totalMidBulan[b])} · Normal: ${fN(totalNormalBulan[b])}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+
+      <!-- Tabel Harian -->
+      <div class="tbl-wrap">
+      <table class="stbl" style="font-size:12px">
+        <thead>
+          <tr style="background:var(--surface2)">
+            <th rowspan="2">Tanggal</th>
+            <th rowspan="2">Hari</th>
+            ${BBM.map(b=>`<th colspan="2" style="text-align:center;border-bottom:1px solid var(--border)">
+              <span class="tag ${BT[b]}" style="font-size:10px">${BL[b]}</span>
+            </th>`).join('')}
+            <th colspan="2" rowspan="2" style="text-align:center">Total Masuk</th>
+          </tr>
+          <tr style="background:var(--surface2)">
+            ${BBM.map(()=>`
+              <th style="text-align:right;font-size:10px;color:var(--blue)">Mid-Shift</th>
+              <th style="text-align:right;font-size:10px;color:var(--amber)">Normal</th>
+            `).join('')}
+          </tr>
+        </thead>
+        <tbody>
+        ${rows.map(d=>{
+          const totalVolHari=BBM.reduce((s,b)=>s+d.total[b],0);
+          const totalNilaiHari=BBM.reduce((s,b)=>s+d.total[b]*gHPP(b),0);
+          const adaMid=BBM.some(b=>d.midShift[b]>0);
+          const adaNormal=BBM.some(b=>d.normal[b]>0);
+          return`<tr>
+            <td style="font-weight:600;white-space:nowrap">${fTgl(d.tanggal)}</td>
+            <td style="font-size:11px;color:var(--text2)">${d.hari||'—'}</td>
+            ${BBM.map(b=>`
+              <td style="text-align:right;color:${d.midShift[b]>0?'var(--blue)':'var(--text3)'};font-weight:${d.midShift[b]>0?600:400}">
+                ${d.midShift[b]>0?fN(d.midShift[b]):'—'}
+              </td>
+              <td style="text-align:right;color:${d.normal[b]>0?'var(--amber)':'var(--text3)'};font-weight:${d.normal[b]>0?600:400}">
+                ${d.normal[b]>0?fN(d.normal[b]):'—'}
+              </td>
+            `).join('')}
+            <td style="text-align:right;font-weight:700">${fN(totalVolHari)} ltr</td>
+            <td style="text-align:right;font-size:11px;color:var(--amber)">${fRF(totalNilaiHari)}</td>
+          </tr>`;
+        }).join('')}
+        </tbody>
+        <tfoot>
+          <tr style="background:var(--blue-bg);font-weight:700">
+            <td colspan="2">TOTAL Mid-Shift</td>
+            ${BBM.map(b=>`
+              <td style="text-align:right;color:var(--blue)">${totalMidBulan[b]>0?fN(totalMidBulan[b]):'—'}</td>
+              <td></td>
+            `).join('')}
+            <td style="text-align:right;color:var(--blue)">${fN(BBM.reduce((s,b)=>s+totalMidBulan[b],0))} ltr</td>
+            <td style="text-align:right;color:var(--blue)">${fRF(BBM.reduce((s,b)=>s+totalMidBulan[b]*gHPP(b),0))}</td>
+          </tr>
+          <tr style="background:var(--amber-bg);font-weight:700">
+            <td colspan="2">TOTAL Normal</td>
+            ${BBM.map(b=>`
+              <td></td>
+              <td style="text-align:right;color:var(--amber)">${totalNormalBulan[b]>0?fN(totalNormalBulan[b]):'—'}</td>
+            `).join('')}
+            <td style="text-align:right;color:var(--amber)">${fN(BBM.reduce((s,b)=>s+totalNormalBulan[b],0))} ltr</td>
+            <td style="text-align:right;color:var(--amber)">${fRF(BBM.reduce((s,b)=>s+totalNormalBulan[b]*gHPP(b),0))}</td>
+          </tr>
+          <tr style="background:var(--surface2);font-weight:800">
+            <td colspan="2">GRAND TOTAL</td>
+            ${BBM.map(b=>`
+              <td style="text-align:right;font-weight:700">${grandTotal[b]>0?fN(grandTotal[b]):''}</td>
+              <td></td>
+            `).join('')}
+            <td style="text-align:right;color:var(--red)">${fN(BBM.reduce((s,b)=>s+grandTotal[b],0))} ltr</td>
+            <td style="text-align:right;color:var(--red)">${fRF(BBM.reduce((s,b)=>s+grandTotal[b]*gHPP(b),0))}</td>
+          </tr>
+        </tfoot>
+      </table>
+      </div>
+      <div style="margin-top:8px;font-size:11px;color:var(--text3);padding:0 2px">
+        💡 Data dari field <strong>Tambah Mid-Shift</strong> (biru) dan <strong>Tambah Normal</strong> (kuning) di Input Data.
+        Nilai rupiah dihitung dari HPP (Harga Jual − Margin) yang berlaku.
+      </div>`;
+    })()}
+  </div>
+
+  <!-- Kalkulator Modal Minimal Mingguan -->
+  <div class="card" id="kalkulator-modal" style="margin-bottom:12px;border:2px solid var(--green-light)">
+    <div class="card-title" style="color:var(--green)">🧮 Kalkulator Modal Minimal Mingguan</div>
+    ${(()=>{
+      // Ambil data 30 hari terakhir untuk rata-rata
+      const sorted=[...state.savedData].sort((a,z)=>a.tanggal>z.tanggal?-1:1);
+      const data30=sorted.slice(0,30);
+      if(!data30.length)return'<div class="empty-state">Butuh minimal 1 hari data untuk kalkulasi.</div>';
+
+      const hariKerja=data30.length;
+
+      // Rata-rata volume per hari per BBM
+      const volHari={};BBM.forEach(b=>volHari[b]=0);
+      data30.forEach(rec=>{
+        BBM.forEach(b=>{rec.shifts.forEach(sh=>{volHari[b]+=(rec.shiftData[sh]?.[b]?.jual||0);});});
+      });
+      BBM.forEach(b=>volHari[b]=volHari[b]/hariKerja);
+
+      // Rata-rata biaya operasional per hari
+      const totalOps=data30.reduce((s,d)=>s+(d.ops||0),0);
+      const opsPerHari=totalOps/hariKerja;
+
+      // Kalkulasi modal per komponen
+      const modalBBM7={};let totalBBM7=0;
+      BBM.forEach(b=>{
+        const hpp=gHPP(b);
+        modalBBM7[b]=Math.round(volHari[b]*hpp*7);
+        totalBBM7+=modalBBM7[b];
+      });
+
+      const safetyStock=Math.round(totalBBM7/7*2); // 2 hari buffer
+      const opsMingguan=Math.round(opsPerHari*7);
+      const modalMinimal=totalBBM7+safetyStock+opsMingguan;
+      const modalIdeal=Math.round(modalMinimal*1.15);
+      const modalKonservatif=Math.round(modalMinimal*1.25);
+
+      // Perputaran modal
+      const totalOmzet30=data30.reduce((s,d)=>s+(d.totalOmzet||0),0);
+      const omzetPerHari=totalOmzet30/hariKerja;
+      const hariKembali=omzetPerHari>0?(modalMinimal/omzetPerHari).toFixed(1):'—';
+
+      return''
+        // Info basis kalkulasi
+        +'<div style="background:var(--surface2);border-radius:var(--radius);padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--text2)">'
+        +'📊 Basis kalkulasi: <strong>'+hariKerja+' hari data</strong> terakhir'
+        +' · Rata-rata omzet/hari: <strong>'+fRF(omzetPerHari)+'</strong>'
+        +'</div>'
+
+        // Tabel rincian per produk
+        +'<div style="overflow-x:auto;margin-bottom:14px">'
+        +'<table class="stbl" style="font-size:12px">'
+        +'<thead><tr>'
+        +'<th>Produk</th>'
+        +'<th style="text-align:right">Rata Jual/hari</th>'
+        +'<th style="text-align:right">HPP/ltr</th>'
+        +'<th style="text-align:right">Modal 7 hari</th>'
+        +'<th style="text-align:right">Safety 2 hari</th>'
+        +'<th style="text-align:right">Total per Produk</th>'
+        +'</tr></thead><tbody>'
+        +BBM.map(b=>{
+          const hpp=gHPP(b);
+          const safety=Math.round(volHari[b]*hpp*2);
+          const total=modalBBM7[b]+safety;
+          return'<tr>'
+            +'<td><span class="tag '+BT[b]+'" style="font-size:11px">'+BL[b]+'</span></td>'
+            +'<td style="text-align:right">'+fN(Math.round(volHari[b]))+' ltr</td>'
+            +'<td style="text-align:right">'+fN(hpp)+'</td>'
+            +'<td style="text-align:right">'+fRF(modalBBM7[b])+'</td>'
+            +'<td style="text-align:right;color:var(--amber)">'+fRF(safety)+'</td>'
+            +'<td style="text-align:right;font-weight:700">'+fRF(total)+'</td>'
+            +'</tr>';
+        }).join('')
+        +'</tbody>'
+        +'<tfoot><tr style="background:var(--surface2);font-weight:700">'
+        +'<td colspan="3">Subtotal Modal BBM + Safety</td>'
+        +'<td style="text-align:right;color:var(--red)">'+fRF(totalBBM7)+'</td>'
+        +'<td style="text-align:right;color:var(--amber)">'+fRF(safetyStock)+'</td>'
+        +'<td style="text-align:right;color:var(--red)">'+fRF(totalBBM7+safetyStock)+'</td>'
+        +'</tr></tfoot>'
+        +'</table></div>'
+
+        // Ringkasan modal
+        +'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:14px">'
+
+        +'<div style="background:var(--surface2);border-radius:var(--radius);padding:14px">'
+        +'<div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:4px">Modal BBM 7 Hari</div>'
+        +'<div style="font-size:16px;font-weight:800;color:var(--red)">'+fRF(totalBBM7)+'</div>'
+        +'<div style="font-size:11px;color:var(--text3);margin-top:2px">Pembelian BBM saja</div>'
+        +'</div>'
+
+        +'<div style="background:var(--amber-bg);border:1px solid var(--amber-light);border-radius:var(--radius);padding:14px">'
+        +'<div style="font-size:10px;font-weight:700;color:var(--amber);text-transform:uppercase;margin-bottom:4px">+ Safety Stock 2 Hari</div>'
+        +'<div style="font-size:16px;font-weight:800;color:var(--amber)">'+fRF(safetyStock)+'</div>'
+        +'<div style="font-size:11px;color:var(--text3);margin-top:2px">Buffer stok darurat</div>'
+        +'</div>'
+
+        +'<div style="background:var(--surface2);border-radius:var(--radius);padding:14px">'
+        +'<div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:4px">+ Biaya Operasional</div>'
+        +'<div style="font-size:16px;font-weight:800">'+fRF(opsMingguan)+'</div>'
+        +'<div style="font-size:11px;color:var(--text3);margin-top:2px">Gaji, listrik, dll/minggu</div>'
+        +'</div>'
+
+        +'</div>'
+
+        // Total rekomendasi
+        +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px">'
+
+        +'<div style="background:var(--green-bg);border:2px solid var(--green-light);border-radius:var(--radius);padding:14px;text-align:center">'
+        +'<div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">✓ MODAL MINIMAL</div>'
+        +'<div style="font-size:20px;font-weight:900;color:var(--green)">'+fRF(modalMinimal)+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-top:4px">Pas-pasan, rawan kehabisan</div>'
+        +'</div>'
+
+        +'<div style="background:var(--blue-bg);border:2px solid var(--blue-light);border-radius:var(--radius);padding:14px;text-align:center">'
+        +'<div style="font-size:11px;font-weight:700;color:var(--blue);margin-bottom:6px">⭐ MODAL IDEAL (+15%)</div>'
+        +'<div style="font-size:20px;font-weight:900;color:var(--blue)">'+fRF(modalIdeal)+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-top:4px">Direkomendasikan untuk operasional lancar</div>'
+        +'</div>'
+
+        +'<div style="background:var(--purple-bg,var(--surface2));border:2px solid var(--border);border-radius:var(--radius);padding:14px;text-align:center">'
+        +'<div style="font-size:11px;font-weight:700;color:var(--purple);margin-bottom:6px">🛡 MODAL KONSERVATIF (+25%)</div>'
+        +'<div style="font-size:20px;font-weight:900;color:var(--purple)">'+fRF(modalKonservatif)+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-top:4px">Aman untuk demand tinggi / keterlambatan DO</div>'
+        +'</div>'
+
+        +'</div>'
+
+        // ── Siklus Kas & Jadwal PO ──────────────────────────
+        // Logika: PO hari ini → pengiriman 2 hari kemudian
+        // Senin jual → PO Senin → terima Rabu
+        // Jumat+Sabtu+Minggu jual → uang terkumpul → PO Senin → terima Selasa
+
+        const hari=['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
+        const now=new Date();
+        const hariIni=now.getDay(); // 0=Minggu, 1=Senin, dst
+
+        // Hitung modal per hari berdasarkan rata-rata
+        const modalPerHariArr=[];
+        let akkumulas=0;
+        for(let h=0;h<7;h++){
+          // Cari rata-rata omzet hari ini dari data historis
+          const dataHari=data30.filter(d=>new Date(d.tanggal+'T00:00:00').getDay()===h);
+          const rataOmzetHari=dataHari.length?dataHari.reduce((s,d)=>s+(d.totalOmzet||0),0)/dataHari.length:omzetPerHari;
+          const rataHppHari=dataHari.length?BBM.reduce((s,b)=>{
+            let v=0;dataHari.forEach(rec=>rec.shifts.forEach(sh=>{v+=rec.shiftData[sh]?.[b]?.jual||0;}));
+            return s+(v/dataHari.length)*gHPP(b);
+          },0):BBM.reduce((s,b)=>s+volHari[b]*gHPP(b),0);
+          modalPerHariArr.push({hari:hari[h],idx:h,omzet:Math.round(rataOmzetHari),modal:Math.round(rataHppHari),data:dataHari.length});
+        }
+
+        // Jadwal PO mingguan (PO hari ini → kirim 2 hari kemudian)
+        // Jumat/Sabtu/Minggu → PO dikumpulkan Senin
+        // Pola BENAR:
+        // Senin-Kamis : Jual H → PO H+1 → Terima H+2
+        // Kamis       : PO Jumat → cover Sabtu+Minggu+Senin (3 hari)
+        // Sabtu+Minggu: Jual → PO Senin → Terima Selasa
+        const jadwalPO=[
+          {po:'Selasa', kirim:'Rabu',             sumber:['Senin'],              hari:3,  keterangan:'Jual Senin → PO Selasa → Terima Rabu (1 hari)'},
+          {po:'Rabu',   kirim:'Kamis',            sumber:['Selasa'],             hari:3,  keterangan:'Jual Selasa → PO Rabu → Terima Kamis (1 hari)'},
+          {po:'Kamis',  kirim:'Jumat',            sumber:['Rabu'],               hari:3,  keterangan:'Jual Rabu → PO Kamis → Terima Jumat (1 hari)'},
+          {po:'Jumat ⭐',kirim:'Sabtu+Minggu+Senin',sumber:['Kamis'],            hari:9,  keterangan:'Jual Kamis → PO Jumat → cover 3 hari (Sabtu/Minggu/Senin)'},
+          {po:'Senin',  kirim:'Selasa',           sumber:['Sabtu','Minggu'],     hari:3,  keterangan:'Akumulasi Jual Sabtu+Minggu → PO Senin → Terima Selasa'},
+        ];
+
+        // Hitung kebutuhan modal per PO
+        // PO Jumat cover 3 hari (Sabtu+Minggu+Senin) → modal × 3
+        const modalHariStd=BBM.reduce((s,b)=>s+volHari[b]*gHPP(b),0);
+        const modalPO=jadwalPO.map(j=>{
+          const baseModal=j.sumber.reduce((s,hr)=>{
+            const d=modalPerHariArr.find(x=>x.hari===hr);
+            return s+(d?d.modal:modalHariStd);
+          },0);
+          // PO Jumat harus cover 3 hari sekaligus
+          const totalModal=j.po.includes('Jumat')?Math.round(baseModal*3):Math.round(baseModal);
+          return{...j,totalModal};
+        });
+
+        const maxPO=Math.max(...modalPO.map(p=>p.totalModal));
+        const modalSiklusMingguan=modalPO.reduce((s,p)=>s+p.totalModal,0);
+
+        // Modal kas yang harus tersedia sebelum minggu berjalan
+        // = PO terbesar (Senin* — akum 3 hari) + ops seminggu
+        // Modal awal yang wajib ada:
+        // PO Jumat (paling besar = 3 hari) + PO Senin (Sabtu+Minggu) + ops
+        const poJumat=modalPO.find(p=>p.po.includes('Jumat'));
+        const poSenin=modalPO.find(p=>p.po==='Senin');
+        // Yg paling kritis: PO Jumat karena cover 3 hari tanpa pemasukan
+        const modalAwalMinggu=(poJumat?.totalModal||0)+opsMingguan;
+
+        return''
+        +'<div style="background:var(--surface2);border-radius:var(--radius);padding:12px 14px;font-size:12px;margin-bottom:14px">'
+        +'<div style="display:flex;gap:24px;flex-wrap:wrap">'
+        +'<div>⏱ <strong>Estimasi modal kembali:</strong> '+hariKembali+' hari</div>'
+        +'<div>📈 <strong>Omzet mingguan:</strong> '+fRF(omzetPerHari*7)+'</div>'
+        +'</div>'
+        +'</div>'
+
+        // Jadwal siklus kas
+        +'<div style="margin-bottom:14px">'
+        +'<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">'
+        +'🔄 Siklus Kas & Jadwal PO Mingguan'
+        +'</div>'
+        +'<div style="overflow-x:auto">'
+        +'<table class="stbl" style="font-size:12px">'
+        +'<thead><tr>'
+        +'<th>Hari PO</th>'
+        +'<th>Hari Kirim</th>'
+        +'<th>Sumber Kas</th>'
+        +'<th style="text-align:right">Modal Dibutuhkan</th>'
+        +'<th style="text-align:right">% dari Minggu</th>'
+        +'<th>Keterangan</th>'
+        +'</tr></thead><tbody>'
+        +modalPO.map(p=>{
+          const pct=modalSiklusMingguan>0?(p.totalModal/modalSiklusMingguan*100):0;
+          const isBesar=p.totalModal===maxPO;
+          const poNama=p.po.replace(' ⭐','');
+          const isHariIniPO=poNama===hari[hariIni]||
+            (poNama==='Senin'&&(hariIni===6||hariIni===0));
+          return'<tr style="'+(isBesar?'background:var(--amber-bg)':isHariIniPO?'background:var(--blue-bg)':'')+'">'
+            +'<td style="font-weight:700;white-space:nowrap">'
+            +(isHariIniPO?'📌 ':'')+p.po
+            +(isBesar?' ⭐':'')
+            +'</td>'
+            +'<td style="white-space:nowrap">'+p.kirim+'</td>'
+            +'<td style="font-size:11px;color:var(--text2)">'+p.sumber.join(' + ')+'</td>'
+            +'<td style="text-align:right;font-weight:700;color:'+(isBesar?'var(--amber)':'var(--text)')+'">'+fRF(p.totalModal)+'</td>'
+            +'<td style="text-align:right">'
+            +'<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end">'
+            +'<div style="width:40px;height:5px;background:var(--surface2);border-radius:3px;overflow:hidden">'
+            +'<div style="width:'+pct.toFixed(0)+'%;height:100%;background:'+(isBesar?'var(--amber)':'var(--blue)')+'"></div></div>'
+            +'<span>'+pct.toFixed(0)+'%</span></div>'
+            +'</td>'
+            +'<td style="font-size:11px;color:var(--text2)">'+p.keterangan+'</td>'
+            +'</tr>';
+        }).join('')
+        +'</tbody>'
+        +'<tfoot><tr style="background:var(--surface2);font-weight:700">'
+        +'<td colspan="3">Total Modal Berputar 1 Minggu</td>'
+        +'<td style="text-align:right;color:var(--red)">'+fRF(modalSiklusMingguan)+'</td>'
+        +'<td style="text-align:right">100%</td>'
+        +'<td></td>'
+        +'</tr></tfoot>'
+        +'</table></div>'
+        +'</div>'
+
+        // Modal kas awal yang harus disiapkan
+        +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">'
+        +'<div style="background:var(--red-bg);border:2px solid #F7C1C1;border-radius:var(--radius);padding:14px">'
+
+        // ── Rekomendasi Order per Produk ─────────────────────────
+        const lastRec=sorted[0];
+        const lastShift=lastRec?lastRec.shifts[lastRec.shifts.length-1]:null;
+        const stokSkrg={};
+        BBM.forEach(b=>{stokSkrg[b]=lastShift&&lastRec?(lastRec.shiftData[lastShift]?.[b]?.stokAkhirEfektif||0):0;});
+        const hariCoverMap={1:1,2:1,3:1,4:3,5:0,6:0,0:1};
+        const coverHari=hariCoverMap[hariIni]||1;
+        const rekomendasiOrder=BBM.map(b=>{
+          const kebutuhanPerHari=volHari[b];
+          const kebutuhanTotal=Math.ceil(kebutuhanPerHari*Math.max(coverHari,1));
+          const stok=stokSkrg[b];
+          const kekurangan=Math.max(0,kebutuhanTotal-stok);
+          const perluOrder=kekurangan>0&&coverHari>0;
+          const volumeOrder=perluOrder?Math.ceil(kekurangan/1000)*1000:0;
+          const nilaiOrder=volumeOrder*gHPP(b);
+          const statusStok=stok>=kebutuhanTotal?'cukup':stok>=kebutuhanPerHari?'tipis':'kurang';
+          return{b,stok,kebutuhanTotal,kebutuhanPerHari,kekurangan,perluOrder,volumeOrder,nilaiOrder,statusStok,coverHari};
+        });
+        const adaYangPerluOrder=rekomendasiOrder.some(r=>r.perluOrder);
+        const totalNilaiOrder=rekomendasiOrder.reduce((s,r)=>s+r.nilaiOrder,0);
+        const totalVolOrder=rekomendasiOrder.reduce((s,r)=>s+r.volumeOrder,0);
+
+
+        // Tampilkan rekomendasi order hari ini
+        +(coverHari>0
+          ?(adaYangPerluOrder
+            ?'<div style="margin-bottom:14px;padding:12px 16px;background:var(--red-bg);border:1px solid #F7C1C1;border-radius:var(--radius)">'
+              +'<div style="font-size:12px;font-weight:700;color:var(--red);margin-bottom:10px">⚠ PRODUK YANG PERLU DI-ORDER HARI INI — '+hari[hariIni]+(hariIni===4?' (cover 3 hari: Sabtu+Minggu+Senin)':' (cover '+coverHari+' hari)')+'</div>'
+              +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">'
+              +rekomendasiOrder.filter(r=>r.perluOrder).map(r=>
+                '<div style="background:#fff8f8;border:1px solid #F7C1C1;border-radius:8px;padding:10px 14px;min-width:160px">'
+                +'<span class="tag '+BT[r.b]+'" style="font-size:12px">'+BL[r.b]+'</span>'
+                +'<div style="font-size:11px;color:var(--text2);margin-top:6px">Stok: '+fN(r.stok)+' ltr</div>'
+                +'<div style="font-size:11px;color:var(--text2)">Butuh: '+fN(r.kebutuhanTotal)+' ltr</div>'
+                +'<div style="font-size:14px;font-weight:800;color:var(--red);margin-top:4px">Order: '+fN(r.volumeOrder)+' ltr</div>'
+                +'<div style="font-size:11px;font-weight:600;color:var(--red)">'+fRF(r.nilaiOrder)+'</div>'
+                +'</div>'
+              ).join('')
+              +rekomendasiOrder.filter(r=>!r.perluOrder).map(r=>
+                '<div style="background:var(--green-bg);border:1px solid var(--green-light);border-radius:8px;padding:10px 14px;min-width:140px;opacity:.8">'
+                +'<span class="tag '+BT[r.b]+'" style="font-size:12px">'+BL[r.b]+'</span>'
+                +'<div style="font-size:11px;color:var(--green);margin-top:6px;font-weight:600">✓ Stok cukup</div>'
+                +'<div style="font-size:11px;color:var(--text2)">'+fN(r.stok)+' ltr tersedia</div>'
+                +'<div style="font-size:12px;color:var(--text3);margin-top:4px">Tidak perlu order</div>'
+                +'</div>'
+              ).join('')
+              +'</div>'
+              +'<div style="font-size:13px;font-weight:700;color:var(--red)">Total modal untuk order hari ini: '+fRF(totalNilaiOrder)+' ('+fN(totalVolOrder)+' ltr)</div>'
+              +'</div>'
+            :'<div style="margin-bottom:14px;padding:10px 16px;background:var(--green-bg);border-radius:var(--radius);font-size:12px;color:var(--green);font-weight:600">'
+              +'✓ Semua stok cukup untuk '+coverHari+' hari ke depan. Tidak perlu order hari ini ('+hari[hariIni]+').'
+              +'</div>')
+          :'<div style="margin-bottom:14px;padding:10px 14px;background:var(--surface2);border-radius:var(--radius);font-size:12px;color:var(--text2)">'
+            +'📅 Tidak ada PO hari ini ('+hari[hariIni]+'). PO dilakukan Senin untuk pengiriman Selasa.'
+            +'</div>')
+
+        +'<div style="font-size:11px;font-weight:700;color:var(--red);margin-bottom:6px">⚠ KAS AWAL YANG HARUS TERSEDIA</div>'
+        +'<div style="font-size:10px;color:var(--text2);margin-bottom:8px">Sebelum siklus minggu berjalan (untuk PO Senin pagi)</div>'
+        +'<div style="font-size:22px;font-weight:900;color:var(--red)">'+fRF(modalAwalMinggu)+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-top:6px">'
+        +'PO Jumat (cover 3 hari Sabtu+Minggu+Senin): '+fRF(poJumat?.totalModal||0)+'<br>'
+        +'+ Biaya operasional minggu ini: '+fRF(opsMingguan)
+        +'</div>'
+        +'</div>'
+        +'<div style="background:var(--green-bg);border:2px solid var(--green-light);border-radius:var(--radius);padding:14px">'
+        +'<div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">✓ MODAL MENGALIR (self-financing)</div>'
+        +'<div style="font-size:10px;color:var(--text2);margin-bottom:8px">Setelah minggu berjalan, kas hari H membiayai PO H+2</div>'
+        +'<div style="font-size:22px;font-weight:900;color:var(--green)">'+fRF(modalSiklusMingguan-modalAwalMinggu)+'</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-top:6px">'
+        +'Senin s/d Kamis berputar sendiri dari omzet harian<br>'
+        +'(jual hari ini → bayar PO besok)'
+        +'</div>'
+        +'</div>'
+        +'</div>'
+
+        +'<div style="background:var(--blue-bg);border-radius:var(--radius);padding:10px 14px;font-size:11px;color:var(--blue)">'
+        +'💡 <strong>Kesimpulan:</strong> '
+        +'Modal paling kritis adalah <strong>PO Jumat</strong> senilai <strong>'+fRF(poJumat?.totalModal||0)+'</strong> '
+        +'karena harus cover 3 hari tanpa pemasukan (Sabtu+Minggu+Senin). '
+        +'Ditambah biaya operasional, total kas yang harus tersedia Jumat pagi: <strong>'+fRF(modalAwalMinggu)+'</strong>. '
+        +'Senin-Kamis, modal berputar sendiri dari omzet harian.'
+        +'</div>';
+    })()}
+  </div>
+
+  <!-- Rekap Semua Periode -->
+  <div class="card">
+    <div class="card-title">📅 Rekap Modal Semua Periode</div>
+    ${allBulan.length===0?`<div class="empty-state">Belum ada data penerimaan.</div>`:`
+    <table class="stbl" style="font-size:12px">
+      <thead><tr>
+        <th>Periode</th>
+        ${BBM.map(b=>`<th style="text-align:right">${BL[b]} (ltr)</th>`).join('')}
+        <th style="text-align:right">Total Modal</th>
+        <th style="text-align:right">DO</th>
+        <th style="text-align:center">Detail</th>
+      </tr></thead>
+      <tbody>
+      ${allBulan.map(bln2=>{
+        const pens=(state.penerimaan||[]).filter(p=>p.tanggal?.slice(0,7)===bln2);
+        const volBBM={};BBM.forEach(b=>volBBM[b]=0);
+        let totalM=0;
+        pens.forEach(p=>{BBM.forEach(b=>{volBBM[b]+=(p.detail?.[b]?.volume||0);totalM+=(p.detail?.[b]?.nilai||0);});});
+        return`<tr ${bln2===lbFilter?'style="background:var(--blue-bg)"':''}>
+          <td style="font-weight:600">${LB(bln2)}</td>
+          ${BBM.map(b=>`<td style="text-align:right">${volBBM[b]>0?fN(volBBM[b])+' ltr':'—'}</td>`).join('')}
+          <td style="text-align:right;font-weight:700;color:var(--red)">${fRF(totalM)}</td>
+          <td style="text-align:right;color:var(--text2)">${pens.length}×</td>
+          <td style="text-align:center">
+            <button class="btn btn-ghost btn-sm" onclick="lbFilter='${bln2}';renderLapBeliPage(e('main-content'))"
+              style="font-size:10px;padding:2px 8px">Detail</button>
+          </td>
+        </tr>`;
+      }).join('')}
+      </tbody>
+    </table>`}
+  </div>
+  `;
+}
+
+// ── Print Laporan Pembelian ────────────────────────────────────
+function printLapBeli(bulan){
+  const bln=['Januari','Februari','Maret','April','Mei','Juni',
+             'Juli','Agustus','September','Oktober','November','Desember'];
+  const LB=v=>{if(!v)return'';const[y,m]=v.split('-');return bln[parseInt(m)-1]+' '+y;};
+  const fTgl=t=>{if(!t)return'—';const[y,m,d]=t.split('-');return d+' '+bln[parseInt(m)-1]+' '+y;};
+  const profil=getProfil();
+  const penBulan=(state.penerimaan||[]).filter(p=>p.tanggal?.slice(0,7)===bulan).sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+  let totalModal=0;
+  const perBBM={};BBM.forEach(b=>perBBM[b]={volume:0,nilai:0});
+  penBulan.forEach(p=>{
+    BBM.forEach(b=>{perBBM[b].volume+=(p.detail?.[b]?.volume||0);perBBM[b].nilai+=(p.detail?.[b]?.nilai||0);});
+    totalModal+=BBM.reduce((s,b)=>s+(p.detail?.[b]?.nilai||0),0);
+  });
+
+  const w=window.open('','_blank','width=1000,height=700');
+  const html='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Lap. Pembelian BBM '+LB(bulan)+'</title>'
+    +'<style>body{font-family:"Times New Roman",serif;font-size:12px;padding:20px 28px}'
+    +'table{width:100%;border-collapse:collapse;margin:10px 0}'
+    +'th{background:#f0f0f0;font-weight:bold;padding:5px 8px;border:1px solid #999;font-size:11px}'
+    +'td{padding:5px 8px;border:1px solid #ddd}.right{text-align:right}'
+    +'.tot{font-weight:bold;background:#e8e8e8;border-top:2px solid #999}'
+    +'@media print{@page{margin:1.5cm;size:A4 landscape}button{display:none}}</style></head><body>'
+    +'<div style="text-align:center;border-bottom:2px solid #000;padding-bottom:10px;margin-bottom:16px">'
+    +'<h2 style="margin:0;font-size:16px">'+(profil.namaSPBU||profil.nama||'SPBU')+'</h2>'
+    +'<h2 style="margin:4px 0;font-size:14px">LAPORAN PEMBELIAN BBM</h2>'
+    +'<div>Periode: '+LB(bulan)+'</div></div>'
+    +'<h3 style="font-size:12px;margin:0 0 6px">Ringkasan Modal per Produk</h3>'
+    +'<table><tr><th>Produk</th><th class="right">Volume (ltr)</th><th class="right">HPP Rata-rata</th><th class="right">Total Modal</th></tr>'
+    +BBM.map(b=>'<tr><td>'+BL[b]+'</td><td class="right">'+fN(perBBM[b].volume)+'</td>'
+      +'<td class="right">'+fN(perBBM[b].volume>0?Math.round(perBBM[b].nilai/perBBM[b].volume):0)+'</td>'
+      +'<td class="right">'+fRF(perBBM[b].nilai)+'</td></tr>').join('')
+    +'<tr class="tot"><td>TOTAL MODAL</td><td class="right">'+fN(BBM.reduce((s,b)=>s+perBBM[b].volume,0))+' ltr</td>'
+    +'<td></td><td class="right">'+fRF(totalModal)+'</td></tr></table>'
+    +'<h3 style="font-size:12px;margin:16px 0 6px">Detail Pembelian Harian</h3>'
+    +'<table><tr><th>Tanggal</th><th>No. DO</th><th>Supplier</th>'
+    +BBM.map(b=>'<th class="right">'+BL[b]+' (ltr)</th>').join('')
+    +BBM.map(b=>'<th class="right">'+BL[b]+' (Rp)</th>').join('')
+    +'<th class="right">Total</th><th>Status</th></tr>'
+    +penBulan.map(p=>{
+      const tn=BBM.reduce((s,b)=>s+(p.detail?.[b]?.nilai||0),0);
+      return'<tr><td>'+fTgl(p.tanggal)+'</td><td style="font-family:monospace;font-size:10px">'+esc(p.noDO||'—')+'</td><td>'+esc(p.supplier||'—')+'</td>'
+        +BBM.map(b=>'<td class="right">'+(p.detail?.[b]?.volume>0?fN(p.detail[b].volume):'—')+'</td>').join('')
+        +BBM.map(b=>'<td class="right">'+(p.detail?.[b]?.nilai>0?fRF(p.detail[b].nilai):'—')+'</td>').join('')
+        +'<td class="right">'+fRF(tn)+'</td>'
+        +'<td style="text-align:center">'+(p.verified?'✓ Verified':'Pending')+'</td></tr>';
+    }).join('')
+    +'<tr class="tot"><td colspan="3">TOTAL</td>'
+    +BBM.map(b=>'<td class="right">'+fN(perBBM[b].volume)+' ltr</td>').join('')
+    +BBM.map(b=>'<td class="right">'+fRF(perBBM[b].nilai)+'</td>').join('')
+    +'<td class="right">'+fRF(totalModal)+'</td><td></td></tr></table>'
+    +'<div style="margin-top:32px;display:flex;justify-content:flex-end;gap:60px">'
+    +'<div style="text-align:center"><div style="width:130px;border-top:1px solid #000;padding-top:4px;margin-top:40px">Mengetahui,</div><div>Owner</div></div>'
+    +'<div style="text-align:center"><div style="width:130px;border-top:1px solid #000;padding-top:4px;margin-top:40px">Dibuat oleh,</div><div>Manager</div></div>'
+    +'</div></body></html>';
+  w.document.write(html);w.document.close();setTimeout(()=>w.print(),500);
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+//  PENERIMAAN BBM
+//  Mencatat setiap pengiriman/penerimaan BBM dari supplier
+// ═══════════════════════════════════════════════════════════════
+let pnMode    = 'form';   // 'form' | 'histori'
+let pnEditId  = null;
+let pnFilter  = '';       // filter bulan YYYY-MM
+
+// ── Generate nomor DO otomatis ────────────────────────────────
+function genNomorDO(){
+  const now=new Date();
+  const y=now.getFullYear();
+  const m=String(now.getMonth()+1).padStart(2,'0');
+  const seq=String((state.penerimaanId||1)).padStart(3,'0');
+  return 'DO/'+y+'/'+m+'/'+seq;
+}
+
+// ── Hitung total volume & nilai penerimaan per periode ────────
+function getPenerimaanBulan(bulan){
+  return (state.penerimaan||[]).filter(p=>p.tanggal&&p.tanggal.slice(0,7)===bulan);
+}
+function getPenerimaanTanggal(tgl){
+  return (state.penerimaan||[]).filter(p=>p.tanggal===tgl);
+}
+
+// ── Render halaman utama ──────────────────────────────────────
+function renderPenerimaanPage(main){
+  if(!main)return;
+  if(!state.penerimaan)state.penerimaan=[];
+  if(!state.penerimaanId)state.penerimaanId=1;
+
+  const now=new Date();
+  const bulanIni=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+  if(!pnFilter)pnFilter=bulanIni;
+
+  const bln=['Januari','Februari','Maret','April','Mei','Juni',
+             'Juli','Agustus','September','Oktober','November','Desember'];
+  const LB=v=>{if(!v)return'—';const[y,m]=v.split('-');return bln[parseInt(m)-1]+' '+y;};
+  const fTgl=t=>{if(!t)return'—';const[y,m,d]=t.split('-');return d+' '+bln[parseInt(m)-1].slice(0,3)+' '+y;};
+
+  // Daftar bulan yang tersedia
+  const bulanSet=new Set([bulanIni]);
+  (state.penerimaan||[]).forEach(p=>{if(p.tanggal)bulanSet.add(p.tanggal.slice(0,7));});
+  const bulanList=[...bulanSet].sort().reverse();
+
+  // Data bulan ini
+  const dataBulan=getPenerimaanBulan(pnFilter)
+    .sort((a,b)=>a.tanggal>b.tanggal?-1:1);
+
+  // Ringkasan per BBM bulan ini
+  const ringkasan={};
+  BBM.forEach(b=>ringkasan[b]={volume:0,nilai:0,count:0});
+  dataBulan.forEach(p=>{
+    BBM.forEach(b=>{
+      if(p.detail&&p.detail[b]&&p.detail[b].volume>0){
+        ringkasan[b].volume+=p.detail[b].volume||0;
+        ringkasan[b].nilai+=p.detail[b].nilai||0;
+        ringkasan[b].count++;
+      }
+    });
+  });
+  const totalVolume=BBM.reduce((s,b)=>s+ringkasan[b].volume,0);
+  const totalNilai=BBM.reduce((s,b)=>s+ringkasan[b].nilai,0);
+
+  // Edit item
+  const editItem=pnEditId?state.penerimaan.find(p=>p.id===pnEditId):null;
+
+  // ── Detail BBM untuk form ─────────────────────────────────
+  const bbmFormRows=BBM.map(b=>{
+    const ev=editItem?.detail?.[b]||{};
+    return`<div style="border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;background:var(--surface)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span class="tag ${BT[b]}" style="font-size:12px">${BL[b]}</span>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text2)">
+          <input type="checkbox" id="pn-aktif-${b}" ${ev.volume>0||!editItem?'checked':''}
+            onchange="pnToggleBBM('${b}')" style="accent-color:var(--blue);width:14px;height:14px">
+          Ada penerimaan
+        </label>
+      </div>
+      <div id="pn-row-${b}" style="${ev.volume>0||!editItem?'':'display:none'}">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+          <div class="fg">
+            <label style="font-size:11px">Volume (ltr)</label>
+            <input type="text" class="inp inp-num" id="pn-vol-${b}"
+              value="${ev.volume>0?fN(ev.volume):''}" placeholder="0"
+              oninput="fmtB(this);pnHitungNilai('${b}')" style="font-size:14px;font-weight:700">
+          </div>
+          <div class="fg">
+            <label style="font-size:11px">Harga Beli/ltr (Rp)</label>
+            <input type="text" class="inp inp-num" id="pn-harga-${b}"
+              value="${ev.hargaBeli>0?fN(ev.hargaBeli):fN(state.harga['hpp_'+b]||0)}"
+              placeholder="${fN(state.harga['hpp_'+b]||0)}"
+              oninput="fmtB(this);pnHitungNilai('${b}')">
+          </div>
+          <div class="fg">
+            <label style="font-size:11px">Total Nilai (Rp)</label>
+            <div class="inp" id="pn-nilai-${b}"
+              style="background:var(--blue-bg);color:var(--blue);font-weight:700;font-size:13px;display:flex;align-items:center">
+              ${ev.nilai>0?fRF(ev.nilai):'—'}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  main.innerHTML=`
+  <div class="page-header">
+    <div>
+      <div class="page-title">🚚 Penerimaan BBM</div>
+      <div class="page-sub">Catat setiap pengiriman BBM dari supplier</div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="pnMode=pnMode==='form'?'histori':'form';renderPenerimaanPage(e('main-content'))">
+        ${pnMode==='form'?'📋 Lihat Histori':'➕ Input Baru'}
+      </button>
+      <button class="btn btn-ghost btn-sm" onclick="printPenerimaan('${pnFilter}')">🖨 Print</button>
+    </div>
+  </div>
+
+  <!-- Filter bulan -->
+  <div class="card" style="padding:12px 16px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-size:12px;font-weight:700;color:var(--text2)">PERIODE:</span>
+      <select class="inp" onchange="pnFilter=this.value;renderPenerimaanPage(e('main-content'))"
+        style="width:180px;padding:5px 10px;font-size:13px;font-weight:600">
+        ${bulanList.map(b=>`<option value="${b}" ${b===pnFilter?'selected':''}>${LB(b)}</option>`).join('')}
+      </select>
+      <div style="margin-left:auto;display:flex;gap:16px;align-items:center;font-size:12px;flex-wrap:wrap">
+        <span style="color:var(--text2)">Total masuk: <strong>${fN(totalVolume)} ltr</strong></span>
+        <span style="color:var(--text2)">Total nilai: <strong style="color:var(--blue)">${fRF(totalNilai)}</strong></span>
+        <span style="color:var(--text2)">${dataBulan.length} pengiriman</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Ringkasan per BBM -->
+  ${totalVolume>0?`
+  <div class="g4" style="gap:10px;margin-bottom:12px">
+    ${BBM.map(b=>{
+      const r=ringkasan[b];
+      if(!r.volume)return`<div class="card" style="padding:12px;opacity:.4">
+        <span class="tag ${BT[b]}">${BL[b]}</span>
+        <div style="font-size:13px;font-weight:700;color:var(--text3);margin-top:8px">—</div>
+        <div style="font-size:11px;color:var(--text3)">Belum ada penerimaan</div>
+      </div>`;
+      return`<div class="card" style="padding:12px;border-top:3px solid var(--blue)">
+        <span class="tag ${BT[b]}">${BL[b]}</span>
+        <div style="font-size:20px;font-weight:800;margin-top:8px">${fN(r.volume)}</div>
+        <div style="font-size:11px;color:var(--text2)">liter · ${r.count}× kirim</div>
+        <div style="font-size:12px;color:var(--blue);margin-top:4px;font-weight:600">${fRF(r.nilai)}</div>
+      </div>`;
+    }).join('')}
+  </div>`:''}
+
+  ${pnMode==='form'?`
+  <!-- ════ FORM INPUT ════ -->
+  <div class="card" style="border:2px solid var(--blue-light)">
+    <div class="card-title" style="color:var(--blue)">${editItem?'✏ Edit Penerimaan':'➕ Catat Penerimaan BBM Baru'}</div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:14px">
+      <div class="fg">
+        <label>Tanggal Terima</label>
+        <input type="date" class="inp" id="pn-tanggal"
+          value="${editItem?.tanggal||new Date().toISOString().slice(0,10)}"
+          max="${new Date().toISOString().slice(0,10)}">
+      </div>
+      <div class="fg">
+        <label>Nomor DO / Surat Jalan</label>
+        <input type="text" class="inp" id="pn-nodo"
+          value="${editItem?.noDO||genNomorDO()}" placeholder="DO/2026/06/001">
+      </div>
+      <div class="fg">
+        <label>Supplier</label>
+        <input type="text" class="inp" id="pn-supplier"
+          value="${editItem?.supplier||''}" placeholder="cth: TBBM Badas" list="pn-supplier-list">
+        <datalist id="pn-supplier-list">
+          ${[...new Set((state.penerimaan||[]).map(p=>p.supplier).filter(Boolean))].map(s=>`<option value="${s}">`).join('')}
+          <option value="TBBM Badas">
+          <option value="Pertamina Mataram">
+          <option value="Pertamina Dompu">
+        </datalist>
+      </div>
+      <div class="fg">
+        <label>Diterima Oleh</label>
+        <input type="text" class="inp" id="pn-diterima"
+          value="${editItem?.diterimaoOleh||currentUser?.name||''}"
+          placeholder="Nama penerima">
+      </div>
+      <div class="fg">
+        <label>No. Polisi Tangki</label>
+        <input type="text" class="inp" id="pn-nopol"
+          value="${editItem?.noPol||''}" placeholder="cth: DR 1234 AB">
+      </div>
+      <div class="fg">
+        <label>No. Pengiriman (jika 1 kirim = beberapa DO)</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span style="font-size:12px;color:var(--text2)">DO ke-</span>
+          <input type="number" class="inp" id="pn-do-ke" min="1" max="99"
+            value="${editItem?.doKe||1}" style="width:60px;text-align:center">
+          <span style="font-size:12px;color:var(--text2)">dari</span>
+          <input type="number" class="inp" id="pn-do-total" min="1" max="99"
+            value="${editItem?.doTotal||1}" style="width:60px;text-align:center">
+          <span style="font-size:12px;color:var(--text2)">DO</span>
+        </div>
+      </div>
+      <div class="fg">
+        <label>No. Referensi Pengiriman <span style="font-size:10px;color:var(--text3)">(jika 1 batch = beberapa DO)</span></label>
+        <input type="text" class="inp" id="pn-ref"
+          value="${editItem?.refPengiriman||''}"
+          placeholder="cth: REF/2026/06/001 (sama untuk semua DO satu kirim)"
+          list="pn-ref-list">
+        <datalist id="pn-ref-list">
+          ${[...new Set((state.penerimaan||[]).map(p=>p.refPengiriman).filter(Boolean))].slice(0,5).map(r=>`<option value="${r}">`).join('')}
+        </datalist>
+      </div>
+      <div class="fg">
+        <label>Keterangan</label>
+        <input type="text" class="inp" id="pn-ket"
+          value="${editItem?.keterangan||''}" placeholder="Opsional">
+      </div>
+    </div>
+
+    <!-- Detail per BBM -->
+    <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;
+      letter-spacing:.06em;margin-bottom:10px">Detail Volume per Produk</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-bottom:14px">
+      ${bbmFormRows}
+    </div>
+
+    <!-- Total -->
+    <div style="background:var(--blue-bg);border:1px solid var(--blue-light);border-radius:var(--radius);
+      padding:12px 14px;margin-bottom:14px;display:flex;gap:24px;flex-wrap:wrap">
+      <div><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase">Total Volume</div>
+        <div id="pn-total-vol" style="font-size:18px;font-weight:800;color:var(--blue)">0 ltr</div></div>
+      <div><div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase">Total Nilai</div>
+        <div id="pn-total-nilai" style="font-size:18px;font-weight:800;color:var(--blue)">Rp 0</div></div>
+      <div style="margin-left:auto;align-self:flex-end">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px">
+          <input type="checkbox" id="pn-verified" ${editItem?.verified?'checked':''}
+            style="accent-color:var(--green);width:14px;height:14px">
+          <span style="font-weight:600;color:var(--green)">✓ Sudah diverifikasi / sesuai fisik</span>
+        </label>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      ${editItem?`<button class="btn btn-ghost" onclick="pnEditId=null;renderPenerimaanPage(e('main-content'))">Batal</button>`:''}
+      <button class="btn btn-primary" onclick="pnSimpan(${editItem?`'${editItem.id}'`:null})">
+        💾 ${editItem?'Simpan Perubahan':'Catat Penerimaan'}
+      </button>
+    </div>
+  </div>`:`
+
+  <!-- ════ HISTORI ════ -->
+  <!-- Ringkasan per Batch Pengiriman -->
+  ${(()=>{
+    // Kelompokkan berdasarkan refPengiriman atau noDO jika tidak ada ref
+    const batches={};
+    dataBulan.forEach(p=>{
+      const key=p.refPengiriman||(p.doTotal>1?'BATCH_'+p.supplier+'_'+p.tanggal:null);
+      if(!key)return; // skip DO tunggal
+      if(!batches[key])batches[key]={ref:key,supplier:p.supplier,tanggal:p.tanggal,dos:[],volume:{},nilai:0};
+      batches[key].dos.push(p);
+      BBM.forEach(b=>{
+        batches[key].volume[b]=(batches[key].volume[b]||0)+(p.detail?.[b]?.volume||0);
+        batches[key].nilai+=(p.detail?.[b]?.nilai||0);
+      });
+    });
+    const batchList=Object.values(batches);
+    if(!batchList.length)return'';
+    return'<div class="card" style="margin-bottom:12px;border-left:4px solid var(--blue)">'
+      +'<div class="card-title" style="color:var(--blue)">📦 Rekap Per Batch Pengiriman</div>'
+      +'<div style="display:flex;flex-direction:column;gap:8px">'
+      +batchList.map(batch=>{
+        const allVerified=batch.dos.every(p=>p.verified);
+        const totalVol=BBM.reduce((s,b)=>s+(batch.volume[b]||0),0);
+        return'<div style="background:var(--surface2);border-radius:var(--radius);padding:10px 14px">'
+          +'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
+          +'<div>'
+          +'<div style="font-weight:700;font-size:13px">'+esc(batch.ref)+'</div>'
+          +'<div style="font-size:11px;color:var(--text2)">'+esc(batch.supplier||'')
+          +' &nbsp;·&nbsp; '+batch.dos.length+' DO &nbsp;·&nbsp; '+fTgl(batch.tanggal)+'</div>'
+          +'</div>'
+          +'<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">'
+          +BBM.map(b=>batch.volume[b]>0?'<div style="font-size:12px"><span class="tag '+BT[b]+'" style="font-size:10px">'+BL[b]+'</span> <strong>'+fN(batch.volume[b])+' ltr</strong></div>':'').join('')
+          +'<div style="font-size:12px;font-weight:700;color:var(--blue)">'+fRF(batch.nilai)+'</div>'
+          +'<div style="font-size:11px">'+(allVerified?'<span style="color:var(--green)">✓ Semua Verified</span>':'<span style="color:var(--amber)">⏳ Sebagian Pending</span>')+'</div>'
+          +'</div></div>'
+          +'<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
+          +batch.dos.map(p=>'<span style="font-size:10px;background:var(--blue-bg);color:var(--blue);padding:2px 8px;border-radius:10px;font-family:monospace">'
+            +esc(p.noDO)+(p.doTotal>1?' ('+p.doKe+'/'+p.doTotal+')':'')+' = '+fN(BBM.reduce((s,b)=>s+(p.detail?.[b]?.volume||0),0))+' ltr</span>').join('')
+          +'</div>'
+          +'</div>';
+      }).join('')
+      +'</div></div>';
+  })()}
+
+  <div class="card">
+    <div class="card-title">Histori Penerimaan — ${LB(pnFilter)}</div>
+    ${dataBulan.length===0?`<div class="empty-state">Belum ada penerimaan di ${LB(pnFilter)}.</div>`:`
+    <div class="tbl-wrap">
+    <table class="stbl" style="font-size:12px">
+      <thead>
+        <tr>
+          <th>Tanggal</th>
+          <th>No. DO</th>
+          <th>Pengiriman</th>
+          <th>Supplier</th>
+          ${BBM.map(b=>`<th style="text-align:right">${BL[b]} (ltr)</th>`).join('')}
+          <th style="text-align:right">Total Nilai</th>
+          <th>Diterima</th>
+          <th style="text-align:center">Status</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+      ${dataBulan.map(p=>{
+        const totalNilaiP=BBM.reduce((s,b)=>s+(p.detail?.[b]?.nilai||0),0);
+        const totalVolP=BBM.reduce((s,b)=>s+(p.detail?.[b]?.volume||0),0);
+        return`<tr>
+          <td style="white-space:nowrap;font-weight:600">${fTgl(p.tanggal)}</td>
+          <td style="font-family:monospace;font-size:11px">
+            ${esc(p.noDO||'—')}
+            ${p.doTotal>1?`<div style="font-size:10px;color:var(--blue);margin-top:2px">DO ${p.doKe||1} dari ${p.doTotal}</div>`:''}
+          </td>
+          <td style="font-size:11px">
+            ${p.refPengiriman?`<div style="font-weight:600;color:var(--text)">${esc(p.refPengiriman)}</div>`:''}
+            ${p.doTotal>1&&p.refPengiriman?`<div style="font-size:10px;color:var(--text3)">Batch ${p.doKe||1}/${p.doTotal}</div>`:'<span style="color:var(--text3)">—</span>'}
+          </td>
+          <td>${esc(p.supplier||'—')}</td>
+          ${BBM.map(b=>`<td style="text-align:right">${p.detail?.[b]?.volume>0?fN(p.detail[b].volume):'—'}</td>`).join('')}
+          <td style="text-align:right;color:var(--blue);font-weight:600">${fRF(totalNilaiP)}</td>
+          <td style="font-size:11px">${esc(p.diterimaoOleh||'—')}</td>
+          <td style="text-align:center">
+            ${p.verified
+              ?'<span style="color:var(--green);font-size:11px;font-weight:600">✓ Verified</span>'
+              :'<span style="color:var(--amber);font-size:11px">⏳ Pending</span>'}
+          </td>
+          <td style="white-space:nowrap">
+            <button class="btn btn-ghost btn-sm" onclick="pnEditId='${p.id}';pnMode='form';renderPenerimaanPage(e('main-content'))"
+              style="font-size:10px;padding:3px 7px">✏</button>
+            <button class="btn btn-del btn-sm" onclick="pnHapus('${p.id}')"
+              style="font-size:10px;padding:3px 7px">✕</button>
+          </td>
+        </tr>`;
+      }).join('')}
+      </tbody>
+      <tfoot>
+        <tr style="background:var(--surface2);font-weight:700">
+          <td colspan="3">TOTAL ${LB(pnFilter)}</td>
+          ${BBM.map(b=>`<td style="text-align:right">${fN(ringkasan[b].volume)} ltr</td>`).join('')}
+          <td style="text-align:right;color:var(--blue)">${fRF(totalNilai)}</td>
+          <td colspan="3"></td>
+        </tr>
+      </tfoot>
+    </table>
+    </div>`}
+  </div>`}
+  `;
+
+  // Hitung total setelah render
+  setTimeout(pnUpdateTotal,50);
+}
+
+// ── Toggle row BBM di form ────────────────────────────────────
+function pnToggleBBM(b){
+  const chk=e('pn-aktif-'+b);
+  const row=e('pn-row-'+b);
+  if(row)row.style.display=chk?.checked?'block':'none';
+  if(!chk?.checked){
+    const vol=e('pn-vol-'+b);const har=e('pn-harga-'+b);
+    if(vol)vol.value='';if(har)har.value='';
+    const nEl=e('pn-nilai-'+b);if(nEl)nEl.textContent='—';
+  }
+  pnUpdateTotal();
+}
+
+// ── Hitung nilai otomatis ─────────────────────────────────────
+function pnHitungNilai(b){
+  const vol=parseInt((e('pn-vol-'+b)?.value||'0').replace(/\./g,''))||0;
+  const harga=parseInt((e('pn-harga-'+b)?.value||'0').replace(/\./g,''))||0;
+  const nilai=vol*harga;
+  const nEl=e('pn-nilai-'+b);
+  if(nEl){nEl.textContent=nilai>0?fRF(nilai):'—';nEl.style.color=nilai>0?'var(--blue)':'var(--text3)';}
+  pnUpdateTotal();
+}
+
+function pnUpdateTotal(){
+  let totalVol=0,totalNilai=0;
+  BBM.forEach(b=>{
+    const chk=e('pn-aktif-'+b);
+    if(!chk?.checked)return;
+    const vol=parseInt((e('pn-vol-'+b)?.value||'0').replace(/\./g,''))||0;
+    const harga=parseInt((e('pn-harga-'+b)?.value||'0').replace(/\./g,''))||0;
+    totalVol+=vol;totalNilai+=vol*harga;
+  });
+  const tvEl=e('pn-total-vol');const tnEl=e('pn-total-nilai');
+  if(tvEl)tvEl.textContent=fN(totalVol)+' ltr';
+  if(tnEl)tnEl.textContent=fRF(totalNilai);
+}
+
+// ── Simpan penerimaan ─────────────────────────────────────────
+function pnSimpan(existingId){
+  const tanggal=e('pn-tanggal')?.value||'';
+  const noDO=(e('pn-nodo')?.value||'').trim();
+  const supplier=(e('pn-supplier')?.value||'').trim();
+  const diterimaoOleh=(e('pn-diterima')?.value||'').trim();
+  const noPol=(e('pn-nopol')?.value||'').trim();
+  const keterangan=(e('pn-ket')?.value||'').trim();
+  const verified=e('pn-verified')?.checked||false;
+  const doKe=parseInt(e('pn-do-ke')?.value||'1')||1;
+  const doTotal=parseInt(e('pn-do-total')?.value||'1')||1;
+  const refPengiriman=(e('pn-ref')?.value||'').trim();
+
+  if(!tanggal){toast('⚠ Tanggal wajib diisi!');return;}
+  if(!noDO){toast('⚠ Nomor DO wajib diisi!');return;}
+  if(!supplier){toast('⚠ Nama supplier wajib diisi!');return;}
+
+  // Kumpulkan detail per BBM
+  const detail={};
+  let adaVolume=false;
+  BBM.forEach(b=>{
+    const chk=e('pn-aktif-'+b);
+    if(!chk?.checked)return;
+    const vol=parseInt((e('pn-vol-'+b)?.value||'0').replace(/\./g,''))||0;
+    const hargaBeli=parseInt((e('pn-harga-'+b)?.value||'0').replace(/\./g,''))||0;
+    if(vol>0){
+      detail[b]={volume:vol,hargaBeli,nilai:vol*hargaBeli};
+      adaVolume=true;
+    }
+  });
+
+  if(!adaVolume){toast('⚠ Isi volume minimal satu produk!');return;}
+
+  if(!state.penerimaan)state.penerimaan=[];
+  if(!state.penerimaanId)state.penerimaanId=1;
+
+  const totalVolume=BBM.reduce((s,b)=>s+(detail[b]?.volume||0),0);
+  const totalNilai=BBM.reduce((s,b)=>s+(detail[b]?.nilai||0),0);
+
+  if(existingId){
+    const idx=state.penerimaan.findIndex(p=>p.id===existingId);
+    if(idx>=0){
+      state.penerimaan[idx]={...state.penerimaan[idx],
+        tanggal,noDO,supplier,diterimaoOleh,noPol,keterangan,
+        doKe,doTotal,refPengiriman,
+        detail,totalVolume,totalNilai,verified,
+        updatedAt:new Date().toISOString()};
+    }
+    toast('✓ Data penerimaan diperbarui!');
+  }else{
+    state.penerimaan.unshift({
+      id:'PN'+Date.now(),
+      tanggal,noDO,supplier,diterimaoOleh,noPol,keterangan,
+      doKe,doTotal,refPengiriman,
+      detail,totalVolume,totalNilai,verified,
+      createdAt:new Date().toISOString(),
+      createdBy:currentUser?.name||'',
+      seq:state.penerimaanId++
+    });
+    toast('✓ Penerimaan berhasil dicatat!');
+  }
+
+  dbSave();
+  if(_fbInited)fbSaveAppState().catch(()=>{});
+  pnEditId=null;
+  pnMode='histori';
+  renderPenerimaanPage(e('main-content'));
+}
+
+function pnHapus(id){
+  const p=state.penerimaan.find(x=>x.id===id);
+  if(!p)return;
+  if(!confirm('Hapus penerimaan '+p.noDO+' tanggal '+p.tanggal+'?'))return;
+  state.penerimaan=state.penerimaan.filter(x=>x.id!==id);
+  dbSave();
+  if(_fbInited)fbSaveAppState().catch(()=>{});
+  toast('✓ Data penerimaan dihapus.');
+  renderPenerimaanPage(e('main-content'));
+}
+
+// ── Print laporan penerimaan ──────────────────────────────────
+function printPenerimaan(bulan){
+  const bln=['Januari','Februari','Maret','April','Mei','Juni',
+             'Juli','Agustus','September','Oktober','November','Desember'];
+  const LB=v=>{if(!v)return'';const[y,m]=v.split('-');return bln[parseInt(m)-1]+' '+y;};
+  const fTgl=t=>{if(!t)return'—';const[y,m,d]=t.split('-');return d+' '+bln[parseInt(m)-1]+' '+y;};
+  const data=getPenerimaanBulan(bulan).sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+  const profil=getProfil();
+
+  // Ringkasan
+  const ring={};BBM.forEach(b=>ring[b]={volume:0,nilai:0});
+  data.forEach(p=>BBM.forEach(b=>{
+    ring[b].volume+=(p.detail?.[b]?.volume||0);
+    ring[b].nilai+=(p.detail?.[b]?.nilai||0);
+  }));
+  const totVol=BBM.reduce((s,b)=>s+ring[b].volume,0);
+  const totNilai=BBM.reduce((s,b)=>s+ring[b].nilai,0);
+
+  const w=window.open('','_blank','width=900,height=700');
+  const html='<!DOCTYPE html><html><head><meta charset="UTF-8">'
+    +'<title>Laporan Penerimaan BBM '+LB(bulan)+'</title>'
+    +'<style>body{font-family:"Times New Roman",serif;font-size:12px;padding:20px 28px}'
+    +'table{width:100%;border-collapse:collapse;margin:10px 0}'
+    +'th{background:#f0f0f0;font-weight:bold;padding:5px 8px;border:1px solid #999;font-size:11px}'
+    +'td{padding:5px 8px;border:1px solid #ddd}'
+    +'.right{text-align:right}.center{text-align:center}'
+    +'.tot{font-weight:bold;background:#e8e8e8;border-top:2px solid #999}'
+    +'@media print{@page{margin:1.5cm;size:A4}button{display:none}}</style></head><body>'
+    +'<div style="text-align:center;border-bottom:2px solid #000;padding-bottom:10px;margin-bottom:16px">'
+    +'<h2 style="margin:0;font-size:16px">'+(profil.namaSPBU||profil.nama||'SPBU')+'</h2>'
+    +'<h2 style="margin:4px 0;font-size:14px">LAPORAN PENERIMAAN BBM</h2>'
+    +'<div>Periode: '+LB(bulan)+'</div>'
+    +'<div style="font-size:11px;color:#666">Dicetak: '+new Date().toLocaleDateString('id-ID',{dateStyle:'long'})+'</div>'
+    +'</div>'
+    +'<h3 style="font-size:12px;margin:0 0 6px">Ringkasan per Produk</h3>'
+    +'<table><tr><th>Produk</th><th class="right">Total Volume (ltr)</th><th class="right">Total Nilai</th></tr>'
+    +BBM.map(b=>'<tr><td>'+BL[b]+'</td><td class="right">'+fN(ring[b].volume)+'</td><td class="right">'+fRF(ring[b].nilai)+'</td></tr>').join('')
+    +'<tr class="tot"><td>TOTAL</td><td class="right">'+fN(totVol)+' ltr</td><td class="right">'+fRF(totNilai)+'</td></tr>'
+    +'</table>'
+    +'<h3 style="font-size:12px;margin:16px 0 6px">Detail Penerimaan</h3>'
+    +'<table><tr><th>Tgl</th><th>No. DO</th><th>Supplier</th>'
+    +BBM.map(b=>'<th class="right">'+BL[b]+'</th>').join('')
+    +'<th class="right">Total Nilai</th><th>Diterima</th><th class="center">Status</th></tr>'
+    +data.map(p=>{
+      const tn=BBM.reduce((s,b)=>s+(p.detail?.[b]?.nilai||0),0);
+      return'<tr><td style="white-space:nowrap">'+fTgl(p.tanggal)+'</td>'
+        +'<td style="font-size:10px;font-family:monospace">'+esc(p.noDO||'—')+'</td>'
+        +'<td>'+esc(p.supplier||'—')+'</td>'
+        +BBM.map(b=>'<td class="right">'+(p.detail?.[b]?.volume>0?fN(p.detail[b].volume):'—')+'</td>').join('')
+        +'<td class="right">'+fRF(tn)+'</td>'
+        +'<td style="font-size:10px">'+esc(p.diterimaoOleh||'—')+'</td>'
+        +'<td class="center" style="font-size:10px">'+(p.verified?'✓ Verified':'Pending')+'</td></tr>';
+    }).join('')
+    +'<tr class="tot"><td colspan="3">TOTAL</td>'
+    +BBM.map(b=>'<td class="right">'+fN(ring[b].volume)+' ltr</td>').join('')
+    +'<td class="right">'+fRF(totNilai)+'</td><td colspan="2"></td></tr>'
+    +'</table>'
+    +'<div style="margin-top:32px;display:flex;justify-content:flex-end;gap:60px">'
+    +'<div style="text-align:center"><div style="width:130px;border-top:1px solid #000;padding-top:4px;margin-top:40px">Mengetahui,</div><div>Owner</div></div>'
+    +'<div style="text-align:center"><div style="width:130px;border-top:1px solid #000;padding-top:4px;margin-top:40px">Diterima oleh,</div><div>Manager</div></div>'
+    +'</div></body></html>';
+
+  w.document.write(html);w.document.close();setTimeout(()=>w.print(),500);
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+//  LAPORAN STOK BBM — NYAWA SPBU
+// ═══════════════════════════════════════════════════════════════
+let slMode = 'harian'; // 'harian' | 'periode'
+let slTgl  = '';
+let slFrom = '';
+let slTo   = '';
+
+// Batas toleransi losses normal (liter/hari per produk)
+const LOSSES_TOLERANSI = {pertalite:50, pertamax:30, dexlite:20, biosolar:30};
+// Batas KRITIS (losses merah merata, wajib investigasi)
+const LOSSES_KRITIS    = {pertalite:150, pertamax:100, dexlite:60, biosolar:80};
+
+function renderStokLaporanPage(main){
+  if(!main)return;
+  if(!state.savedData.length){
+    main.innerHTML=`<div class="page-header"><div class="page-title">🛢 Laporan Stok BBM</div></div>
+    <div class="card"><div class="empty-state">Belum ada data tersimpan.</div></div>`;
+    return;
+  }
+  const sorted=[...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+  const tglList=sorted.map(d=>d.tanggal).reverse();
+  if(!slTgl)slTgl=tglList[0]||'';
+  if(!slFrom)slFrom=tglList[tglList.length-1]||'';
+  if(!slTo)slTo=tglList[0]||'';
+
+  // ── Pilih data yang ditampilkan ──────────────────────────
+  let rows=[];
+  if(slMode==='harian'){
+    const rec=state.savedData.find(d=>d.tanggal===slTgl);
+    if(rec)rows=[rec];
+  }else{
+    rows=sorted.filter(d=>d.tanggal>=slFrom&&d.tanggal<=slTo);
+  }
+
+  // ── Hitung per baris (hari) per BBM ──────────────────────
+  function hitungHari(rec){
+    const result={};
+    // Ambil data penerimaan BBM untuk tanggal ini
+    const penerimaanHari=getPenerimaanTanggal(rec.tanggal);
+    BBM.forEach(b=>{
+      let stokAwal=0,penerimaan=0,jual=0,losses=0,plus=0;
+      let penerimaanDO=0,nilaiPenerimaan=0;
+      const shiftPertama=rec.shifts[0];
+      stokAwal=(rec.shiftData[shiftPertama]?.[b]?.awal)||0;
+      rec.shifts.forEach(sh=>{
+        const sd=rec.shiftData[sh]?.[b]||{};
+        jual+=sd.jual||0;
+        penerimaan+=(sd.tambah||0)+(sd.tambahNormal||0);
+        losses+=sd.losses||0;
+        plus+=sd.plus||0;
+      });
+      // Penerimaan dari modul Penerimaan BBM (dokumen resmi DO)
+      penerimaanHari.forEach(p=>{
+        if(p.detail?.[b]?.volume>0){
+          penerimaanDO+=p.detail[b].volume;
+          nilaiPenerimaan+=p.detail[b].nilai||0;
+        }
+      });
+      // Total penerimaan = DO resmi + tambah mid-shift + tambah normal
+      // Keduanya saling melengkapi:
+      //   - penerimaan (shift) = volume yang masuk ke tangki saat shift
+      //   - penerimaanDO = dokumen resmi dari supplier (untuk rekonsiliasi)
+      // Untuk stok sistem: pakai data shift (lebih akurat untuk kalkulasi harian)
+      // Untuk rekonsiliasi: tampilkan keduanya agar bisa dibandingkan
+      const penerimaanAktual=penerimaan; // tetap pakai data shift untuk stok
+      const stokSistem=Math.max(0,stokAwal+penerimaanAktual-jual);
+      const shiftTerakhir=rec.shifts[rec.shifts.length-1];
+      const stokAkhirFisik=(rec.shiftData[shiftTerakhir]?.[b]?.stokAkhirEfektif)||stokSistem;
+      result[b]={stokAwal,penerimaan:penerimaanAktual,penerimaanDO,
+        nilaiPenerimaan,jual,losses,plus,stokSistem,stokAkhirFisik,selisih:losses};
+    });
+    return result;
+  }
+
+  // ── Kalkulasi semua hari ──────────────────────────────────
+  const dataHari=rows.map(rec=>({tanggal:rec.tanggal,hari:rec.hari||'',data:hitungHari(rec)}));
+
+  // ── Akumulasi per BBM untuk period view ──────────────────
+  const akumBBM={};
+  BBM.forEach(b=>{akumBBM[b]={stokAwal:0,penerimaan:0,jual:0,losses:0,plus:0,selisih:0,hariKritis:0,hariMelebihi:0};});
+  dataHari.forEach(d=>{
+    BBM.forEach(b=>{
+      const h=d.data[b];
+      akumBBM[b].stokAwal+=h.stokAwal;
+      akumBBM[b].penerimaan+=h.penerimaan;
+      akumBBM[b].jual+=h.jual;
+      akumBBM[b].losses+=h.losses;
+      akumBBM[b].plus+=h.plus;
+      akumBBM[b].selisih+=h.selisih;
+      if(h.losses>LOSSES_KRITIS[b])akumBBM[b].hariKritis++;
+      else if(h.losses>LOSSES_TOLERANSI[b])akumBBM[b].hariMelebihi++;
+    });
+  });
+
+  // ── Analisa tren losses 30 hari ───────────────────────────
+  const hist30=[...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1).slice(0,30).reverse();
+  const trenLosses={};
+  BBM.forEach(b=>{
+    trenLosses[b]=hist30.map(rec=>{
+      let l=0;rec.shifts.forEach(sh=>{l+=rec.shiftData[sh]?.[b]?.losses||0;});
+      return{tgl:rec.tanggal,losses:l};
+    });
+  });
+
+  // ── Helper ───────────────────────────────────────────────
+  const fTgl=t=>{if(!t)return'—';const[y,m,d]=t.split('-');const B=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];return`${d} ${B[parseInt(m)-1]} ${y}`;};
+  const hari=t=>{if(!t)return'';return['Min','Sen','Sel','Rab','Kam','Jum','Sab'][new Date(t+'T00:00:00').getDay()];};
+
+  // Status losses per baris
+  function statusLosses(losses,b){
+    if(losses===0)return`<span style="color:var(--green);font-weight:600">✓ 0</span>`;
+    if(losses<=LOSSES_TOLERANSI[b])return`<span style="color:var(--amber);font-weight:600">⚠ ${fN(losses)}</span>`;
+    if(losses<=LOSSES_KRITIS[b])return`<span style="color:var(--red);font-weight:600">🔴 ${fN(losses)}</span>`;
+    return`<span style="background:var(--red);color:#fff;padding:1px 6px;border-radius:4px;font-weight:700">🚨 ${fN(losses)}</span>`;
+  }
+
+  // Badge sinyal bahaya keseluruhan
+  function badgeHari(d){
+    const totalL=BBM.reduce((s,b)=>s+d.data[b].losses,0);
+    const adaKritis=BBM.some(b=>d.data[b].losses>LOSSES_KRITIS[b]);
+    const adaMelebihi=BBM.some(b=>d.data[b].losses>LOSSES_TOLERANSI[b]);
+    if(adaKritis)return`<span style="background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px">🚨 KRITIS</span>`;
+    if(adaMelebihi)return`<span style="background:var(--amber-bg);color:var(--amber);font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;border:1px solid var(--amber-light)">⚠ WASPADA</span>`;
+    if(totalL===0)return`<span style="color:var(--green);font-size:10px;font-weight:600">✓ Normal</span>`;
+    return`<span style="color:var(--green);font-size:10px;font-weight:600">✓ Toleransi</span>`;
+  }
+
+  // ── Ring sinyal ───────────────────────────────────────────
+  const totalLossesHariIni=BBM.reduce((s,b)=>s+(dataHari[0]?.data[b]?.losses||0),0);
+  const adaKritisHariIni=BBM.some(b=>(dataHari[0]?.data[b]?.losses||0)>LOSSES_KRITIS[b]);
+  const hariKritisTotal=BBM.reduce((s,b)=>s+akumBBM[b].hariKritis,0);
+
+  main.innerHTML=`
+  <div class="page-header">
+    <div>
+      <div class="page-title">🛢 Laporan Stok BBM</div>
+      <div class="page-sub">Kontrol stok harian — deteksi selisih, kebocoran, dan penyimpangan</div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="printStokLaporan()">🖨 Print</button>
+    </div>
+  </div>
+
+  ${adaKritisHariIni?`
+  <div style="background:var(--red);color:#fff;padding:14px 18px;border-radius:var(--radius);margin-bottom:12px;display:flex;align-items:center;gap:12px;font-weight:700">
+    <span style="font-size:22px">🚨</span>
+    <div>
+      <div style="font-size:14px">LOSSES KRITIS TERDETEKSI — Wajib Investigasi Sekarang</div>
+      <div style="font-size:12px;font-weight:400;opacity:.9;margin-top:2px">Selisih stok melebihi batas kritis. Kemungkinan: pencurian, dispenser error, atau permainan internal.</div>
+    </div>
+  </div>`:''}
+
+  <!-- FILTER -->
+  <div class="card" style="padding:12px 16px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div class="snav" style="margin:0">
+        <button class="snav-btn${slMode==='harian'?' active':''}" onclick="slMode='harian';renderStokLaporanPage(e('main-content'))">Per Hari</button>
+        <button class="snav-btn${slMode==='periode'?' active':''}" onclick="slMode='periode';renderStokLaporanPage(e('main-content'))">Periode</button>
+      </div>
+      ${slMode==='harian'?`
+      <select class="inp" onchange="slTgl=this.value;renderStokLaporanPage(e('main-content'))" style="width:200px;padding:5px 8px;font-size:13px;font-weight:600">
+        ${tglList.map(t=>`<option value="${t}" ${t===slTgl?'selected':''}>${hari(t)}, ${fTgl(t)}</option>`).join('')}
+      </select>`:`
+      <input type="date" class="inp" value="${slFrom}" onchange="slFrom=this.value;renderStokLaporanPage(e('main-content'))" style="width:140px;padding:5px 8px;font-size:12px">
+      <span style="font-size:12px;color:var(--text2)">s/d</span>
+      <input type="date" class="inp" value="${slTo}" onchange="slTo=this.value;renderStokLaporanPage(e('main-content'))" style="width:140px;padding:5px 8px;font-size:12px">`}
+    </div>
+  </div>
+
+  <!-- KARTU RINGKASAN PER BBM -->
+  <div class="g4" style="gap:10px;margin-bottom:12px">
+  ${BBM.map(b=>{
+    const a=akumBBM[b];
+    const rataLosses=dataHari.length>0?(a.losses/dataHari.length):0;
+    const statusWarna=a.hariKritis>0?'var(--red)':a.hariMelebihi>0?'var(--amber)':'var(--green)';
+    const pctLosses=a.jual>0?(a.losses/a.jual*100):0;
+    return`<div class="card" style="padding:14px;border-left:4px solid ${statusWarna}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+        <span class="tag ${BT[b]}" style="font-size:12px">${BL[b]}</span>
+        ${a.hariKritis>0?`<span style="background:var(--red);color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px">${a.hariKritis} hari kritis</span>`:
+          a.hariMelebihi>0?`<span style="background:var(--amber-bg);color:var(--amber);font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;border:1px solid var(--amber-light)">${a.hariMelebihi} hari waspada</span>`:
+          `<span style="color:var(--green);font-size:10px">✓ Aman</span>`}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px">
+        <div><span style="color:var(--text2)">Penerimaan</span><div style="font-weight:700;font-size:13px">${fN(a.penerimaan)} ltr</div></div>
+        <div><span style="color:var(--text2)">Terjual</span><div style="font-weight:700;font-size:13px">${fN(a.jual)} ltr</div></div>
+        <div><span style="color:var(--text2)">Total Losses</span><div style="font-weight:700;font-size:13px;color:${a.losses>0?'var(--red)':'var(--green)'}">${fN(a.losses)} ltr</div></div>
+        <div><span style="color:var(--text2)">% Losses</span><div style="font-weight:700;font-size:13px;color:${pctLosses>1?'var(--red)':'var(--green)'}">${pctLosses.toFixed(2)}%</div></div>
+      </div>
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--text2)">
+        Rata-rata losses/hari: <strong style="color:${rataLosses>LOSSES_TOLERANSI[b]?'var(--red)':'var(--text)'}">${fN(Math.round(rataLosses))} ltr</strong>
+        &nbsp;|&nbsp; Toleransi: <strong>${fN(LOSSES_TOLERANSI[b])} ltr</strong>
+      </div>
+    </div>`;
+  }).join('')}
+  </div>
+
+  <!-- TABEL UTAMA LAPORAN STOK -->
+  <div class="card" style="margin-bottom:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px 0">
+      <div class="card-title" style="margin:0">Kartu Stok BBM ${slMode==='harian'?fTgl(slTgl):'Periode '+fTgl(slFrom)+' – '+fTgl(slTo)}</div>
+      <div style="font-size:11px;color:var(--text2)">
+        <span style="color:var(--green)">●</span> Normal &nbsp;
+        <span style="color:var(--amber)">●</span> Waspada (&gt;toleransi) &nbsp;
+        <span style="color:var(--red)">●</span> Kritis (wajib investigasi)
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:4px;display:none" id="scroll-hint">← Geser kanan untuk lihat lebih →</div>
+    <div class="tbl-wrap">
+    <table class="stbl" style="font-size:12px">
+      <thead>
+        <tr style="background:var(--surface2)">
+          <th rowspan="2" style="text-align:left;min-width:90px">Tanggal</th>
+          <th rowspan="2" style="text-align:center">Status</th>
+          ${BBM.map(b=>`<th colspan="6" style="text-align:center;border-left:2px solid var(--border2)"><span class="tag ${BT[b]}">${BL[b]}</span></th>`).join('')}
+        </tr>
+        <tr style="background:var(--surface2);font-size:10px">
+          ${BBM.map(()=>`
+            <th style="border-left:2px solid var(--border2);color:var(--text2)">Stok Awal</th>
+            <th style="color:var(--blue)">Tambah Shift</th>
+            <th style="color:var(--green)">Terima DO</th>
+            <th style="color:var(--text2)">Terjual</th>
+            <th style="color:var(--text2)">Stok Sistem</th>
+            <th style="color:var(--text2)">Stok Fisik</th>
+            <th style="color:var(--red)">Losses/Plus</th>`).join('')}
+        </tr>
+      </thead>
+      <tbody>
+      ${dataHari.length===0?`<tr><td colspan="${2+BBM.length*6}" style="text-align:center;padding:20px;color:var(--text3)">Tidak ada data untuk periode ini</td></tr>`:''}
+      ${dataHari.map(d=>{
+        const badge=badgeHari(d);
+        return`<tr style="${BBM.some(b=>d.data[b].losses>LOSSES_KRITIS[b])?'background:var(--red-bg)':BBM.some(b=>d.data[b].losses>LOSSES_TOLERANSI[b])?'background:var(--amber-bg)':''}">
+          <td style="font-weight:600;white-space:nowrap">
+            <div>${hari(d.tanggal)}, ${fTgl(d.tanggal)}</div>
+          </td>
+          <td style="text-align:center">${badge}</td>
+          ${BBM.map(b=>{
+            const h=d.data[b];
+            const selisihVal=h.losses>0?`-${fN(h.losses)}`:(h.plus>0?`+${fN(h.plus)}`:'0');
+            const selisihColor=h.losses>LOSSES_KRITIS[b]?'var(--red)':h.losses>LOSSES_TOLERANSI[b]?'var(--amber)':h.plus>0?'var(--purple)':'var(--green)';
+            return`<td style="text-align:right;border-left:2px solid var(--border2)">${fN(h.stokAwal)}</td>
+            <td style="text-align:right;color:var(--blue)" title="Tambah mid-shift + normal">${h.penerimaan>0?'+'+fN(h.penerimaan):'—'}</td>
+            <td style="text-align:right;color:var(--green);font-weight:${h.penerimaanDO>0?600:400}" title="Penerimaan DO resmi">${h.penerimaanDO>0?'+'+fN(h.penerimaanDO):'—'}</td>
+            <td style="text-align:right">${fN(h.jual)}</td>
+            <td style="text-align:right;font-weight:600">${fN(h.stokSistem)}</td>
+            <td style="text-align:right;font-weight:600">${fN(h.stokAkhirFisik)}</td>
+            <td style="text-align:right;font-weight:700;color:${selisihColor}">${statusLosses(h.losses,b)}${h.plus>0?`<span style="color:var(--purple)">+${fN(h.plus)}</span>`:''}</td>`;
+          }).join('')}
+        </tr>`;
+      }).join('')}
+      ${dataHari.length>1?`
+      <tr style="background:var(--surface2);font-weight:700;border-top:2px solid var(--border2)">
+        <td colspan="2" style="font-weight:700">TOTAL</td>
+        ${BBM.map(b=>`
+        <td style="text-align:right;border-left:2px solid var(--border2)">${fN(dataHari[0]?.data[b]?.stokAwal||0)}</td>
+        <td style="text-align:right;color:var(--blue)">+${fN(akumBBM[b].penerimaan)}</td>
+        <td style="text-align:right">${fN(akumBBM[b].jual)}</td>
+        <td style="text-align:right"></td>
+        <td style="text-align:right"></td>
+        <td style="text-align:right;color:var(--red)">${fN(akumBBM[b].losses)} ltr</td>`).join('')}
+      </tr>`:''}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- ANALISA SELISIH & PANDUAN INVESTIGASI -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:12px">
+
+    <!-- Panduan Investigasi -->
+    <div class="card" style="padding:16px;border-left:4px solid var(--red)">
+      <div style="font-size:13px;font-weight:700;color:var(--red);margin-bottom:12px">🔍 Panduan Investigasi Selisih</div>
+      <div style="font-size:12px;color:var(--text2);line-height:1.7">
+        <div style="margin-bottom:8px"><strong style="color:var(--text)">Losses ≤ ${fN(LOSSES_TOLERANSI.pertalite)} ltr/hari</strong> — Normal. Penguapan, sisa pipa, toleransi meter.</div>
+        <div style="margin-bottom:8px"><strong style="color:var(--amber)">${fN(LOSSES_TOLERANSI.pertalite)}–${fN(LOSSES_KRITIS.pertalite)} ltr/hari</strong> — Waspada. Monitor ketat, cek dispenser & seal tangki.</div>
+        <div style="margin-bottom:8px"><strong style="color:var(--red)">&gt; ${fN(LOSSES_KRITIS.pertalite)} ltr/hari</strong> — KRITIS. Hentikan shift, investigasi langsung.</div>
+        <div style="border-top:1px solid var(--border);padding-top:10px;margin-top:4px">
+          <div style="font-weight:700;color:var(--text);margin-bottom:6px">Kemungkinan Penyebab:</div>
+          <div>🔴 <strong>Pencurian</strong> — Losses terjadi konsisten di shift tertentu</div>
+          <div>🔴 <strong>Dispenser error</strong> — Losses besar tiba-tiba satu hari</div>
+          <div>🟡 <strong>Penguapan abnormal</strong> — Losses kecil terus-menerus</div>
+          <div>🟡 <strong>Permainan internal</strong> — Losses selalu di atas toleransi</div>
+          <div>⚪ <strong>Kesalahan input</strong> — Cek ulang data input shift</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tren Losses 30 Hari -->
+    <div class="card" style="padding:16px">
+      <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px">📈 Tren Losses 30 Hari Terakhir</div>
+      ${BBM.map(b=>{
+        const tren=trenLosses[b];
+        const maxL=Math.max(...tren.map(x=>x.losses),1);
+        const totalL=tren.reduce((s,x)=>s+x.losses,0);
+        const rataL=tren.length>0?totalL/tren.length:0;
+        const hariKritisL=tren.filter(x=>x.losses>LOSSES_KRITIS[b]).length;
+        const hariWaspadaL=tren.filter(x=>x.losses>LOSSES_TOLERANSI[b]&&x.losses<=LOSSES_KRITIS[b]).length;
+        return`<div style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span class="tag ${BT[b]}" style="font-size:10px">${BL[b]}</span>
+            <span style="font-size:11px;color:var(--text2)">rata-rata <strong style="color:${rataL>LOSSES_TOLERANSI[b]?'var(--red)':'var(--text)'}">${fN(Math.round(rataL))} ltr</strong>/hari</span>
+          </div>
+          <!-- Mini chart: bar per hari -->
+          <div style="display:flex;align-items:flex-end;gap:2px;height:32px;background:var(--surface2);border-radius:4px;padding:2px 4px">
+            ${tren.slice(-20).map(x=>{
+              const h=Math.max(2,Math.round((x.losses/maxL)*28));
+              const col=x.losses>LOSSES_KRITIS[b]?'var(--red)':x.losses>LOSSES_TOLERANSI[b]?'var(--amber)':x.losses>0?'var(--green-light)':'var(--border)';
+              return`<div style="flex:1;height:${h}px;background:${col};border-radius:1px" title="${fTgl(x.tgl)}: ${fN(x.losses)} ltr"></div>`;
+            }).join('')}
+          </div>
+          <div style="display:flex;gap:10px;margin-top:4px;font-size:10px">
+            ${hariKritisL>0?`<span style="color:var(--red)">🔴 ${hariKritisL} hari kritis</span>`:''}
+            ${hariWaspadaL>0?`<span style="color:var(--amber)">⚠ ${hariWaspadaL} hari waspada</span>`:''}
+            ${hariKritisL===0&&hariWaspadaL===0?`<span style="color:var(--green)">✓ Terkontrol</span>`:''}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>
+
+  <!-- DETAIL PER SHIFT (mode harian) -->
+  ${slMode==='harian'&&rows.length>0?`
+  <div class="card">
+    <div class="card-title">Detail Per Shift — ${fTgl(slTgl)}</div>
+    <div class="tbl-wrap">
+    <table class="stbl" style="font-size:12px">
+      <thead>
+        <tr>
+          <th>Shift</th>
+          <th>Produk</th>
+          <th>Stok Awal</th>
+          <th>Penerimaan</th>
+          <th>Terjual</th>
+          <th>Stok Akhir Sistem</th>
+          <th>Stok Akhir Fisik</th>
+          <th style="color:var(--red)">Losses / Plus</th>
+          <th>Keterangan</th>
+        </tr>
+      </thead>
+      <tbody>
+      ${(rows[0]?.shifts||[]).map(sh=>{
+        const shiftLabel={pagi:'Pagi 06–14',siang:'Siang 14–22',malam:'Malam 22–06'};
+        const shiftCol={pagi:'var(--green)',siang:'var(--blue)',malam:'var(--purple)'};
+        return BBM.map((b,bi)=>{
+          const sd=rows[0].shiftData[sh]?.[b]||{};
+          const stokSistem=Math.max(0,(sd.awal||0)+(sd.tambah||0)+(sd.tambahNormal||0)-(sd.jual||0));
+          const ket=sd.losses>0?(sd.losses>LOSSES_KRITIS[b]?'🚨 Kritis':sd.losses>LOSSES_TOLERANSI[b]?'⚠ Waspada':'✓ Toleransi'):sd.plus>0?'📈 Plus':'✓ Normal';
+          return`<tr>
+            ${bi===0?`<td rowspan="${BBM.length}" style="font-weight:700;color:${shiftCol[sh]};vertical-align:middle">${shiftLabel[sh]}</td>`:''}
+            <td><span class="tag ${BT[b]}">${BL[b]}</span></td>
+            <td style="text-align:right">${fN(sd.awal||0)}</td>
+            <td style="text-align:right;color:var(--blue)">${(sd.tambah||0)+(sd.tambahNormal||0)>0?'+'+fN((sd.tambah||0)+(sd.tambahNormal||0)):'—'}</td>
+            <td style="text-align:right">${fN(sd.jual||0)}</td>
+            <td style="text-align:right;font-weight:600">${fN(stokSistem)}</td>
+            <td style="text-align:right;font-weight:600">${fN(sd.stokAkhirEfektif||stokSistem)}</td>
+            <td style="text-align:right;font-weight:700;color:${sd.losses>LOSSES_KRITIS[b]?'var(--red)':sd.losses>LOSSES_TOLERANSI[b]?'var(--amber)':sd.plus>0?'var(--purple)':'var(--green)'}">
+              ${sd.losses>0?statusLosses(sd.losses,b):sd.plus>0?`+${fN(sd.plus)}`:'—'}
+            </td>
+            <td style="font-size:11px">${ket}</td>
+          </tr>`;
+        }).join('');
+      }).join('<tr><td colspan="9" style="padding:2px;background:var(--surface2)"></td></tr>')}
+      </tbody>
+    </table>
+    </div>
+  </div>`:''}
+  `;
+}
+
+function printStokLaporan(){
+  const d=e('main-content');
+  if(!d)return;
+  const w=window.open('','_blank','width=1100,height=700');
+  const tgl=slMode==='harian'?slTgl:slFrom+' sd '+slTo;
+  w.document.write(`<html><head><title>Laporan Stok BBM ${tgl}</title>
+  <style>
+    body{font-family:system-ui,sans-serif;font-size:11px;color:#111;padding:16px}
+    h2{margin:0 0 4px;font-size:16px} .sub{color:#666;font-size:11px;margin-bottom:16px}
+    table{width:100%;border-collapse:collapse;margin-bottom:12px}
+    th{background:#f0f0f0;font-weight:700;padding:5px 7px;border:1px solid #ddd;font-size:10px}
+    td{padding:5px 7px;border:1px solid #ddd}
+    .tag{padding:1px 5px;border-radius:3px;font-size:9px;font-weight:700}
+    .kritis{background:#fee;color:#c00;font-weight:700}
+    .waspada{background:#fff3e0;color:#b45309}
+    @media print{button{display:none}}
+  </style></head><body>
+  <h2>🛢 Laporan Stok BBM</h2>
+  <div class="sub">Dicetak: ${new Date().toLocaleString('id-ID')} | Periode: ${tgl}</div>
+  `+d.innerHTML+`</body></html>`);
+  w.document.close();
+  setTimeout(()=>w.print(),500);
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════
+//  BEBAN USAHA — Manajemen Beban Terpisah per Periode
+// ═══════════════════════════════════════════════════════════════
+const BEBAN_KAT={
+  gaji:        {label:'Gaji & Upah',             icon:'👥',color:'#2D6A2D',bg:'#EAF3DE',sub:['Gaji Pokok','Tunjangan','Lembur','Bonus','BPJS Ketenagakerjaan','BPJS Kesehatan']},
+  operasional: {label:'Beban Operasional',        icon:'⚙', color:'#185FA5',bg:'#E6F1FB',sub:['Listrik','Air','BBM Kendaraan','ATK','Seragam','Kebersihan']},
+  perawatan:   {label:'Perawatan & Pemeliharaan', icon:'🔧',color:'#854F0B',bg:'#FAEEDA',sub:['Servis Dispenser','Servis Genset','Perbaikan Tangki','Kalibrasi Meter','Perawatan Gedung']},
+  administrasi:{label:'Administrasi & Umum',      icon:'📄',color:'#534AB7',bg:'#EEEDFE',sub:['Perizinan','Retribusi','Alat Tulis','Komunikasi','Internet','Konsumsi']},
+  lainnya:     {label:'Beban Lain-lain',           icon:'📌',color:'#5F5E5A',bg:'#F1EFE8',sub:['Beban Bunga','Denda','Sumbangan','Lain-lain']}
+};
+// Map kategori biayaItems harian → BEBAN_KAT
+const CAT_MAP={gaji:'gaji',listrik:'operasional',perawatan:'perawatan',administrasi:'administrasi',lainnya:'lainnya'};
+
+let bebanMode='input';
+let bebanBulan='';
+let bebanEditId=null;
+
+// ── Ambil beban untuk bulan tertentu ─────────────────────────
+// Sumber 1: state.bebanUsaha (modul beban)
+// Sumber 2: biayaItems dari savedData (input harian) — digabung per bulan
+function getBebanBulan(bulan){
+  if(!bulan)return[];
+  const items=[];
+  // Dari modul beban usaha
+  (state.bebanUsaha||[]).forEach(b=>{
+    if(b.recurring){
+      // Recurring muncul di semua bulan
+      items.push({...b,bulan,id:'R'+b.id+'_'+bulan,recurringRef:b.id,sumber:'beban'});
+    }else if(b.bulan===bulan){
+      items.push({...b,sumber:'beban'});
+    }
+  });
+  // Dari biayaItems input harian — agregasi per kategori per bulan
+  const hariKat={};
+  (state.savedData||[]).filter(d=>d.tanggal.slice(0,7)===bulan).forEach(d=>{
+    (d.biayaItems||[]).forEach(item=>{
+      const kat=CAT_MAP[item.cat]||'lainnya';
+      const key=kat+'|'+item.ket;
+      if(!hariKat[key])hariKat[key]={kategori:kat,subkategori:'',keterangan:item.ket,nominal:0,sumber:'harian',id:'H_'+key+'_'+bulan};
+      hariKat[key].nominal+=item.nom;
+    });
+  });
+  Object.values(hariKat).forEach(h=>items.push(h));
+  return items.sort((a,z)=>Object.keys(BEBAN_KAT).indexOf(a.kategori)-Object.keys(BEBAN_KAT).indexOf(z.kategori));
+}
+
+function getBebanTotalBulan(bulan){
+  const t={};Object.keys(BEBAN_KAT).forEach(k=>t[k]=0);
+  getBebanBulan(bulan).forEach(b=>{t[b.kategori]=(t[b.kategori]||0)+b.nominal;});
+  t._total=Object.values(t).reduce((s,v)=>s+v,0);
+  return t;
+}
+
+// ── Kalkulasi beban untuk rentang tanggal (untuk Laba Rugi) ──
+function getBebanPeriode(tglFrom,tglTo){
+  const bulanSet=new Set();
+  (state.savedData||[]).filter(d=>d.tanggal>=tglFrom&&d.tanggal<=tglTo)
+    .forEach(d=>bulanSet.add(d.tanggal.slice(0,7)));
+  const result={gaji:0,operasional:0,perawatan:0,administrasi:0,lainnya:0,_total:0};
+  bulanSet.forEach(bln=>{
+    const t=getBebanTotalBulan(bln);
+    Object.keys(BEBAN_KAT).forEach(k=>{result[k]+=t[k]||0;});
+  });
+  result._total=Object.keys(BEBAN_KAT).reduce((s,k)=>s+result[k],0);
+  return result;
+}
+
+function renderBebanPage(main){
+  if(!main)return;
+  if(!state.bebanUsaha)state.bebanUsaha=[];
+  if(!state.bebanId)state.bebanId=1;
+  const now=new Date();
+  const bulanIni=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+  if(!bebanBulan)bebanBulan=bulanIni;
+  const bulanSet=new Set([bulanIni]);
+  (state.savedData||[]).forEach(d=>bulanSet.add(d.tanggal.slice(0,7)));
+  (state.bebanUsaha||[]).filter(b=>!b.recurring).forEach(b=>bulanSet.add(b.bulan));
+  const bulanList=[...bulanSet].sort().reverse();
+  const bln=['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+  const LB=v=>{const[y,m]=v.split('-');return`${bln[parseInt(m)-1]} ${y}`;};
+  const itemsBln=getBebanBulan(bebanBulan);
+  const totKat=getBebanTotalBulan(bebanBulan);
+  const totAll=totKat._total;
+  const editItem=bebanEditId?state.bebanUsaha.find(b=>b.id===bebanEditId):null;
+
+  // Pisahkan sumber: modul beban vs harian
+  const itemModul=itemsBln.filter(i=>i.sumber==='beban');
+  const itemHarian=itemsBln.filter(i=>i.sumber==='harian');
+  const totHarian=itemHarian.reduce((s,i)=>s+i.nominal,0);
+  const totModul=itemModul.reduce((s,i)=>s+i.nominal,0);
+
+  main.innerHTML=`
+  <div class="page-header">
+    <div><div class="page-title">📝 Beban Usaha</div>
+    <div class="page-sub">Input dan kelola beban — terhubung otomatis ke Laporan Laba Rugi</div></div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="bebanMode=bebanMode==='input'?'rekap':'input';renderBebanPage(e('main-content'))">
+        ${bebanMode==='input'?'📊 Lihat Rekap':'✏ Input Beban'}</button>
+    </div>
+  </div>
+
+  <!-- FILTER BULAN -->
+  <div class="card" style="padding:12px 16px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-size:12px;font-weight:700;color:var(--text2)">PERIODE:</span>
+      <select class="inp" onchange="bebanBulan=this.value;bebanEditId=null;renderBebanPage(e('main-content'))" style="width:200px;padding:5px 10px;font-size:13px;font-weight:600">
+        ${bulanList.map(b=>`<option value="${b}" ${b===bebanBulan?'selected':''}>${LB(b)}</option>`).join('')}
+      </select>
+      <div style="margin-left:auto;display:flex;gap:12px;align-items:center">
+        <div style="font-size:12px;color:var(--text2)">Input Harian: <strong style="color:var(--amber)">Rp ${fN(totHarian)}</strong></div>
+        <div style="font-size:12px;color:var(--text2)">Beban Tambahan: <strong style="color:var(--blue)">Rp ${fN(totModul)}</strong></div>
+        <div style="font-size:13px;font-weight:800;color:var(--red)">Total: Rp ${fN(totAll)}</div>
+        <button class="btn btn-ghost btn-sm" onclick="printBeban('${bebanBulan}')">🖨 Print</button>
+      </div>
+    </div>
+  </div>
+
+  ${bebanMode==='input'?`
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px">
+
+    <!-- FORM TAMBAH -->
+    <div class="card" style="padding:16px">
+      <div class="card-title">${editItem?'✏ Edit Beban':'+ Tambah Beban Usaha'} — ${LB(bebanBulan)}</div>
+      <div style="display:grid;gap:10px;margin-top:8px">
+        <div>
+          <label style="font-size:11px;font-weight:700;color:var(--text2);display:block;margin-bottom:6px">KATEGORI</label>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${Object.entries(BEBAN_KAT).map(([k,v])=>`
+            <button onclick="selectBebanKat('${k}')" id="bkat-${k}" class="btn btn-sm"
+              style="font-size:11px;padding:5px 10px;background:${(editItem?.kategori||'gaji')===k?v.bg:'var(--surface2)'};color:${(editItem?.kategori||'gaji')===k?v.color:'var(--text2)'};border:1px solid ${(editItem?.kategori||'gaji')===k?v.color:'var(--border)'}">
+              ${v.icon} ${v.label}</button>`).join('')}
+          </div>
+          <input type="hidden" id="b2-kat" value="${editItem?.kategori||'gaji'}">
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">SUB KATEGORI</label>
+          <select class="inp" id="b2-sub" style="font-size:13px" onchange="if(this.value!=='_custom')e('b2-ket').value=this.value">
+            ${(BEBAN_KAT[editItem?.kategori||'gaji'].sub||[]).map(s=>`<option value="${s}" ${editItem?.subkategori===s?'selected':''}>${s}</option>`).join('')}
+            <option value="_custom">— Tulis manual —</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">KETERANGAN</label>
+          <input type="text" class="inp" id="b2-ket" value="${editItem?.keterangan||''}" placeholder="Detail keterangan beban" style="font-size:13px">
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">NOMINAL (Rp)</label>
+          <input type="text" class="inp inp-num" id="b2-nom" value="${editItem?fN(editItem.nominal):''}" placeholder="0" oninput="fmtB(this)" style="font-size:15px;font-weight:700">
+        </div>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:var(--amber-bg);border-radius:var(--radius);border:1px solid var(--amber-light)">
+          <input type="checkbox" id="b2-recurring" ${editItem?.recurring?'checked':''} style="width:16px;height:16px;accent-color:var(--amber)">
+          <div><div style="font-size:12px;font-weight:700;color:var(--amber)">🔁 Beban Rutin Bulanan</div>
+          <div style="font-size:11px;color:var(--text2)">Otomatis muncul di semua bulan</div></div>
+        </label>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" onclick="${editItem?`saveEditBeban(${editItem.id})`:'addBeban2()'}" style="flex:1">
+            ${editItem?'💾 Simpan Perubahan':'+ Tambah'}</button>
+          ${editItem?`<button class="btn btn-ghost" onclick="bebanEditId=null;renderBebanPage(e('main-content'))">Batal</button>`:''}
+        </div>
+      </div>
+    </div>
+
+    <!-- DAFTAR BEBAN BULAN INI -->
+    <div class="card" style="padding:16px">
+      <div class="card-title">Rekapan Beban — ${LB(bebanBulan)}</div>
+
+      ${itemHarian.length>0?`
+      <div style="background:var(--amber-bg);border:1px solid var(--amber-light);border-radius:var(--radius);padding:10px 12px;margin-bottom:10px">
+        <div style="font-size:11px;font-weight:700;color:var(--amber);margin-bottom:6px">📥 Dari Input Harian (otomatis)</div>
+        ${Object.keys(BEBAN_KAT).map(k=>{
+          const grup=itemHarian.filter(i=>i.kategori===k);
+          if(!grup.length)return'';
+          return grup.map(item=>`
+          <div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;border-bottom:1px solid var(--amber-light)">
+            <span style="color:var(--text2)">${esc(item.keterangan)}</span>
+            <strong>Rp ${fN(item.nominal)}</strong>
+          </div>`).join('');
+        }).join('')}
+        <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700;padding-top:6px;color:var(--amber)">
+          <span>Subtotal dari Input Harian</span><span>Rp ${fN(totHarian)}</span>
+        </div>
+      </div>`:'<div style="padding:8px 12px;background:var(--surface2);border-radius:var(--radius);font-size:11px;color:var(--text3);margin-bottom:10px">Tidak ada biaya dari input harian bulan ini</div>'}
+
+      ${itemModul.length>0?`
+      <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:6px">Beban Tambahan (Input Modul)</div>
+      <div class="tbl-wrap">
+      <table class="stbl" style="font-size:12px">
+        <thead><tr><th>Keterangan</th><th>Kategori</th><th style="text-align:right">Nominal</th><th style="text-align:center">Rutin</th><th></th></tr></thead>
+        <tbody>
+        ${itemModul.map(item=>{
+          const kat=BEBAN_KAT[item.kategori]||BEBAN_KAT.lainnya;
+          return`<tr>
+            <td><div style="font-weight:600">${esc(item.keterangan||'—')}</div>
+              ${item.subkategori?`<div style="font-size:10px;color:var(--text3)">${item.subkategori}</div>`:''}
+            </td>
+            <td><span class="cat-badge" style="background:${kat.bg};color:${kat.color};font-size:10px">${kat.icon} ${kat.label}</span></td>
+            <td style="text-align:right;font-weight:700">Rp ${fN(item.nominal)}</td>
+            <td style="text-align:center">${item.recurring||item.recurringRef?'<span style="color:var(--amber)">🔁</span>':'—'}</td>
+            <td>
+              ${!item.recurringRef?`
+              <button class="btn btn-ghost btn-sm" onclick="bebanEditId=${item.id};renderBebanPage(e('main-content'))" style="font-size:10px;padding:2px 6px">✏</button>
+              <button class="btn btn-del btn-sm" onclick="delBeban(${item.id})" style="font-size:10px;padding:2px 6px">✕</button>`
+              :`<span style="font-size:10px;color:var(--text3)">rutin</span>`}
+            </td>
+          </tr>`;
+        }).join('')}
+        </tbody>
+      </table></div>`
+      :`<div style="padding:8px 12px;background:var(--surface2);border-radius:var(--radius);font-size:11px;color:var(--text3)">Belum ada beban tambahan. Tambahkan di form kiri.</div>`}
+
+      <!-- RINGKASAN PER KATEGORI -->
+      ${totAll>0?`
+      <div style="margin-top:12px;padding:10px 12px;background:var(--red-bg);border:1px solid var(--red-light,#F7C1C1);border-radius:var(--radius)">
+        <div style="font-size:11px;font-weight:700;color:var(--red);margin-bottom:8px;text-transform:uppercase">Komposisi Beban ${LB(bebanBulan)}</div>
+        ${Object.entries(BEBAN_KAT).map(([k,v])=>{
+          const nom=totKat[k]||0;if(!nom)return'';
+          const pct=totAll>0?(nom/totAll*100):0;
+          return`<div style="margin-bottom:6px">
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">
+              <span>${v.icon} ${v.label}</span><strong>Rp ${fN(nom)} (${pct.toFixed(0)}%)</strong>
+            </div>
+            <div style="height:5px;background:var(--surface2);border-radius:3px;overflow:hidden">
+              <div style="height:100%;width:${pct}%;background:${v.color};border-radius:3px"></div>
+            </div>
+          </div>`;
+        }).join('')}
+        <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:800;border-top:1px solid var(--border);padding-top:6px;color:var(--red)">
+          <span>TOTAL BEBAN</span><span>Rp ${fN(totAll)}</span>
+        </div>
+      </div>`:''}
+    </div>
+  </div>
+
+  <!-- BEBAN RUTIN -->
+  ${(state.bebanUsaha||[]).filter(b=>b.recurring).length>0?`
+  <div class="card" style="margin-top:12px;padding:16px">
+    <div class="card-title">🔁 Beban Rutin Bulanan</div>
+    <div class="tbl-wrap">
+    <table class="stbl" style="font-size:12px">
+      <thead><tr><th>Keterangan</th><th>Kategori</th><th style="text-align:right">Nominal/bulan</th><th></th></tr></thead>
+      <tbody>
+      ${(state.bebanUsaha||[]).filter(b=>b.recurring).map(item=>{
+        const kat=BEBAN_KAT[item.kategori]||BEBAN_KAT.lainnya;
+        return`<tr>
+          <td><strong>${esc(item.keterangan||'—')}</strong></td>
+          <td><span class="cat-badge" style="background:${kat.bg};color:${kat.color}">${kat.icon} ${kat.label}</span></td>
+          <td style="text-align:right;font-weight:700">Rp ${fN(item.nominal)}</td>
+          <td>
+            <button class="btn btn-ghost btn-sm" onclick="bebanEditId=${item.id};renderBebanPage(e('main-content'))" style="font-size:10px">✏</button>
+            <button class="btn btn-del btn-sm" onclick="delBeban(${item.id})" style="font-size:10px">✕</button>
+          </td>
+        </tr>`;
+      }).join('')}
+      </tbody>
+      <tfoot><tr style="background:var(--surface2);font-weight:700">
+        <td colspan="2">Total Rutin/bulan</td>
+        <td style="text-align:right;color:var(--red)">Rp ${fN((state.bebanUsaha||[]).filter(b=>b.recurring).reduce((s,b)=>s+b.nominal,0))}</td>
+        <td></td>
+      </tr></tfoot>
+    </table></div>
+  </div>`:''}
+
+  `:`
+  <!-- ════ MODE REKAP SEMUA PERIODE ════ -->
+  <div class="card">
+    <div class="card-title">Rekap Beban Usaha Semua Periode</div>
+    <div class="tbl-wrap">
+    <table class="stbl" style="font-size:12px">
+      <thead><tr>
+        <th>Periode</th>
+        ${Object.entries(BEBAN_KAT).map(([k,v])=>`<th style="text-align:right">${v.icon} ${v.label}</th>`).join('')}
+        <th style="text-align:right;color:var(--red)">TOTAL</th>
+        <th></th>
+      </tr></thead>
+      <tbody>
+        ${bulanList.map(bln=>{
+          const tot=getBebanTotalBulan(bln);
+          return`<tr>
+            <td style="font-weight:600">${LB(bln)}</td>
+            ${Object.keys(BEBAN_KAT).map(k=>`<td style="text-align:right;font-size:11px">${tot[k]>0?'Rp '+fN(tot[k]):'—'}</td>`).join('')}
+            <td style="text-align:right;font-weight:700;color:var(--red)">${tot._total>0?'Rp '+fN(tot._total):'—'}</td>
+            <td><button class="btn btn-ghost btn-sm" onclick="bebanBulan='${bln}';bebanMode='input';renderBebanPage(e('main-content'))" style="font-size:10px">Detail</button></td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table></div>
+  </div>`}
+  `;
+  setTimeout(()=>selectBebanKat(e('b2-kat')?.value||'gaji',false),10);
+}
+
+function selectBebanKat(kat,updateSub=true){
+  const katEl=e('b2-kat');if(katEl)katEl.value=kat;
+  Object.keys(BEBAN_KAT).forEach(k=>{
+    const btn=e('bkat-'+k);if(!btn)return;
+    const v=BEBAN_KAT[k];
+    if(k===kat){btn.style.background=v.bg;btn.style.color=v.color;btn.style.borderColor=v.color;}
+    else{btn.style.background='var(--surface2)';btn.style.color='var(--text2)';btn.style.borderColor='var(--border)';}
+  });
+  if(updateSub){
+    const subEl=e('b2-sub');
+    if(subEl)subEl.innerHTML=(BEBAN_KAT[kat]?.sub||[]).map(s=>`<option value="${s}">${s}</option>`).join('')+'<option value="_custom">— Tulis manual —</option>';
+  }
+}
+
+function addBeban2(){
+  const kat=e('b2-kat')?.value||'gaji';
+  let sub=e('b2-sub')?.value||'';if(sub==='_custom')sub='';
+  const ket=(e('b2-ket')?.value||'').trim()||sub;
+  const nom=parseInt((e('b2-nom')?.value||'').replace(/\./g,''))||0;
+  const recurring=e('b2-recurring')?.checked||false;
+  if(!ket){toast('⚠ Isi keterangan beban.');return;}
+  if(nom<=0){toast('⚠ Nominal harus lebih dari 0.');return;}
+  if(!state.bebanUsaha)state.bebanUsaha=[];
+  if(!state.bebanId)state.bebanId=1;
+  state.bebanUsaha.push({id:state.bebanId++,bulan:bebanBulan,kategori:kat,subkategori:sub,keterangan:ket,nominal:nom,recurring,createdAt:new Date().toISOString()});
+  dbSave();
+  if(_fbInited) fbSaveAppState().catch(()=>{});
+  toast('✓ Beban ditambahkan');
+  renderBebanPage(e('main-content'));
+}
+
+function saveEditBeban(id){
+  const item=state.bebanUsaha.find(b=>b.id===id);if(!item)return;
+  let sub=e('b2-sub')?.value||'';if(sub==='_custom')sub='';
+  item.kategori=e('b2-kat')?.value||item.kategori;
+  item.subkategori=sub;
+  item.keterangan=(e('b2-ket')?.value||'').trim()||sub;
+  item.nominal=parseInt((e('b2-nom')?.value||'').replace(/\./g,''))||0;
+  item.recurring=e('b2-recurring')?.checked||false;
+  bebanEditId=null;dbSave();toast('✓ Beban diperbarui');
+  renderBebanPage(e('main-content'));
+}
+
+function delBeban(id){
+  if(!confirm('Hapus item beban ini?'))return;
+  state.bebanUsaha=(state.bebanUsaha||[]).filter(b=>b.id!==id);
+  dbSave();renderBebanPage(e('main-content'));
+}
+
+function printBeban(bulan){
+  const bln2=['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+  const LB2=v=>{const[y,m]=v.split('-');return`${bln2[parseInt(m)-1]} ${y}`;};
+  const items=getBebanBulan(bulan);
+  const totKat=getBebanTotalBulan(bulan);
+  const profil=getProfil();
+  const w=window.open('','_blank','width=800,height=600');
+  w.document.write(`<html><head><title>Beban Usaha ${LB2(bulan)}</title>
+  <style>body{font-family:'Times New Roman',serif;font-size:12px;color:#000;padding:24px 32px}
+  h2{margin:0;font-size:16px}table{width:100%;border-collapse:collapse;margin-bottom:8px}
+  th{background:#f0f0f0;font-weight:700;padding:5px 8px;border:1px solid #ccc}
+  td{padding:5px 8px;border:1px solid #ddd}.right{text-align:right}.total{font-weight:800;background:#e8e8e8}
+  @media print{button{display:none}@page{margin:1.5cm}}</style></head><body>
+  <div style="text-align:center;margin-bottom:20px;border-bottom:2px solid #333;padding-bottom:12px">
+    <h2>${profil?.namaSPBU||'SPBU'}</h2><h2>LAPORAN BEBAN USAHA</h2>
+    <div>Periode: ${LB2(bulan)}</div>
+    <div style="font-size:11px;color:#666">Dicetak: ${new Date().toLocaleDateString('id-ID',{dateStyle:'long'})}</div>
+  </div>
+  ${Object.entries(BEBAN_KAT).map(([k,v])=>{
+    const katItems=items.filter(i=>i.kategori===k);if(!katItems.length)return'';
+    return`<h3 style="margin:12px 0 4px">${v.label}</h3>
+    <table><tr><th>No</th><th>Keterangan</th><th>Sumber</th><th class="right">Nominal</th><th>Rutin</th></tr>
+    ${katItems.map((item,i)=>`<tr>
+      <td style="text-align:center">${i+1}</td>
+      <td>${esc(item.keterangan||'—')}</td>
+      <td style="font-size:10px;color:#888">${item.sumber==='harian'?'Input Harian':'Beban Usaha'}</td>
+      <td class="right">Rp ${fN(item.nominal)}</td>
+      <td style="text-align:center">${item.recurring||item.recurringRef?'🔁':''}</td>
+    </tr>`).join('')}
+    <tr class="total"><td colspan="3">Subtotal ${v.label}</td><td class="right">Rp ${fN(totKat[k]||0)}</td><td></td></tr>
+    </table>`;
+  }).join('')}
+  <table style="margin-top:16px;border-top:3px double #333">
+    <tr class="total" style="font-size:14px"><td colspan="3"><strong>TOTAL BEBAN USAHA ${LB2(bulan)}</strong></td>
+    <td class="right"><strong>Rp ${fN(totKat._total||0)}</strong></td><td></td></tr>
+  </table>
+  <div style="margin-top:40px;display:flex;justify-content:flex-end;gap:60px">
+    <div style="text-align:center"><div style="width:120px;border-top:1px solid #333;padding-top:4px;margin-top:40px">Mengetahui</div><div>Owner</div></div>
+    <div style="text-align:center"><div style="width:120px;border-top:1px solid #333;padding-top:4px;margin-top:40px">Dibuat oleh</div><div>Manager</div></div>
+  </div></body></html>`);
+  w.document.close();setTimeout(()=>w.print(),500);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  LAPORAN LABA RUGI
+// ═══════════════════════════════════════════════════════════════
+let lrMode='bulanan';
+let lrBulan='';
+let lrFrom='';
+let lrTo='';
+let lrJumlahOwner=2;
+let lrDividenPct=10;
+
+
+function renderLabaRugiPage(main){
+  if(!main)return;
+  if(!state.savedData.length){
+    main.innerHTML=`<div class="page-header"><div class="page-title">📋 Laporan Laba Rugi</div></div><div class="card"><div class="empty-state">Belum ada data tersimpan.</div></div>`;
+    return;
+  }
+  const sorted=[...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+  const bulanList=[...new Set(sorted.map(d=>d.tanggal.slice(0,7)))];
+  const thnList=[...new Set(bulanList.map(b=>b.slice(0,4)))];
+  if(!lrBulan)lrBulan=bulanList[0]||'';
+  if(!lrFrom)lrFrom=sorted[sorted.length-1]?.tanggal||'';
+  if(!lrTo)lrTo=sorted[0]?.tanggal||'';
+
+  const bln=['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+  const LB=v=>{const[y,m]=v.split('-');return`${bln[parseInt(m)-1]} ${y}`;};
+  const fTgl=t=>{if(!t)return'—';const[y,m,d]=t.split('-');return`${d} ${bln[parseInt(m)-1].slice(0,3)} ${y}`;};
+
+  // ── Tentukan bulan/periode yang dicakup ──────────────────
+  let bulanCakupan=[];
+  if(lrMode==='bulanan'){
+    bulanCakupan=[lrBulan];
+  }else if(lrMode==='tahunan'){
+    const thn=lrBulan.slice(0,4);
+    bulanCakupan=bulanList.filter(b=>b.startsWith(thn));
+  }else{
+    // kustom: ambil semua bulan yang tanggalnya masuk range
+    const bulanSet=new Set();
+    sorted.filter(d=>d.tanggal>=lrFrom&&d.tanggal<=lrTo).forEach(d=>bulanSet.add(d.tanggal.slice(0,7)));
+    bulanCakupan=[...bulanSet];
+  }
+
+  // ── SUMBER 1: Data penjualan & HPP dari getRekapData ────
+  // Gunakan getRekapData bulanan untuk setiap bulan, lalu agregasi
+  let pendapatanKotor=0, hpp=0, totalJualLtr=0, hariCount=0;
+  let lossesLtr=0, plusLtr=0, lossesRp=0, plusRp=0;
+  const omzetBBM={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+  const labaBBM={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+  const volBBM={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+
+  bulanCakupan.forEach(bln2=>{
+    const rd=getRekapData('bulanan',bln2);
+    if(!rd.rows.length)return;
+    const row=rd.rows[0];
+    pendapatanKotor+=row.omzet||0;
+    totalJualLtr+=row.jual||0;
+    hariCount+=row.hariCount||0;
+    lossesLtr+=row.losses||0;
+    plusLtr+=row.plus||0;
+    lossesRp+=row.lossesRp||0;
+    plusRp+=row.plusRp||0;
+    hpp+=(row.omzet||0)-(row.labaKotor||0);
+    BBM.forEach(b=>{
+      omzetBBM[b]+=(row.bbmOmzet?.[b]||0);
+      labaBBM[b]+=(row.bbmLaba?.[b]||0);
+      volBBM[b]+=(row.bbmVol?.[b]||0);
+    });
+  });
+  const labaKotor=pendapatanKotor-hpp;
+
+  // ── SUMBER 2: Beban Usaha dari getBebanBulan ────────────
+  const bebanAkum={gaji:0,operasional:0,perawatan:0,administrasi:0,lainnya:0};
+  const bebanDetail={};  // untuk tampilkan item per kategori
+  bulanCakupan.forEach(bln2=>{
+    const items=getBebanBulan(bln2);
+    items.forEach(item=>{
+      const kat=item.kategori||'lainnya';
+      bebanAkum[kat]=(bebanAkum[kat]||0)+item.nominal;
+      if(!bebanDetail[kat])bebanDetail[kat]=[];
+      bebanDetail[kat].push({...item,bulan:bln2});
+    });
+  });
+  const totalBebanUsaha=Object.values(bebanAkum).reduce((s,v)=>s+v,0);
+
+  // ── Kalkulasi final ──────────────────────────────────────
+  const netoSelisih=plusRp-lossesRp; // positif = untung, negatif = rugi
+  const jumlahBebanUsaha=totalBebanUsaha+(lossesRp>plusRp?lossesRp-plusRp:0);
+  const keuntunganPlus=plusRp>lossesRp?plusRp-lossesRp:0;
+  const labaRugiUsaha=labaKotor-totalBebanUsaha-lossesRp+plusRp;
+  const dividen=labaRugiUsaha>0?(labaRugiUsaha*lrDividenPct/100):0;
+  const labaSetelahDividen=labaRugiUsaha-dividen;
+  const labaBersihPerOwner=lrJumlahOwner>0?(labaSetelahDividen/lrJumlahOwner):labaSetelahDividen;
+
+  const labelPeriode=lrMode==='bulanan'?LB(lrBulan):lrMode==='tahunan'?lrBulan.slice(0,4):`${fTgl(lrFrom)} – ${fTgl(lrTo)}`;
+  const profil=getProfil();
+  const tglFrom=sorted.filter(d=>bulanCakupan.includes(d.tanggal.slice(0,7))).map(d=>d.tanggal).sort()[0]||'';
+  const tglTo=[...sorted.filter(d=>bulanCakupan.includes(d.tanggal.slice(0,7))).map(d=>d.tanggal)].sort().reverse()[0]||'';
+
+  // ── Helper baris tabel ───────────────────────────────────
+  const fV=v=>v===null||v===undefined?'':v<0?`(${fRF(Math.abs(v))})`:fRF(v);
+  const rowH=(label,note)=>`<tr style="background:var(--surface2)">
+    <td colspan="2" style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--text2);padding:8px 14px">${label}${note?`<span style="font-size:10px;font-weight:400;margin-left:8px;color:var(--text3)">${note}</span>`:''}</td>
+    <td></td>
+  </tr>`;
+  const rowI=(label,val,opts={})=>`<tr>
+    <td style="padding:5px 14px 5px ${14+(opts.indent||0)*18}px;font-size:13px;color:${opts.color||'var(--text)'}${opts.indent?';color:var(--text2)':''}">${label}</td>
+    <td style="text-align:right;font-size:11px;color:var(--text3);padding-right:8px;white-space:nowrap">${opts.note||''}</td>
+    <td style="text-align:right;padding:5px 14px;font-weight:${opts.bold?700:opts.indent?400:500};font-size:13px;color:${opts.color||'var(--text)'}">${val===null||val===undefined?'':fV(val)}</td>
+  </tr>`;
+  const rowT=(label,val,color,dbl)=>`<tr style="background:${color?color+'18':'var(--surface2)'}">
+    <td colspan="2" style="padding:9px 14px;font-weight:800;font-size:14px;color:${color||'var(--text)'}">${label}</td>
+    <td style="text-align:right;padding:9px 14px;font-weight:800;font-size:15px;color:${color||'var(--text)'};${dbl?'border-top:3px double '+(color||'#333'):'border-top:1px solid var(--border)'}">${fV(val)}</td>
+  </tr>`;
+  const rowDiv=()=>`<tr><td colspan="3" style="padding:1px 0;border-top:1px solid var(--border)"></td></tr>`;
+  const rowSp=()=>`<tr><td colspan="3" style="padding:5px 0"></td></tr>`;
+
+  main.innerHTML=`
+  <div class="page-header">
+    <div><div class="page-title">📋 Laporan Laba Rugi</div>
+    <div class="page-sub">Data dari Rekap Penjualan + Laporan Beban Usaha — ${labelPeriode}</div></div>
+    <button class="btn btn-ghost btn-sm" onclick="printLabaRugi()">🖨 Print / PDF</button>
+  </div>
+
+  <!-- FILTER -->
+  <div class="card" style="padding:12px 16px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div class="snav" style="margin:0">
+        ${['bulanan','tahunan','kustom'].map(m=>`<button class="snav-btn${lrMode===m?' active':''}" onclick="lrMode='${m}';renderLabaRugiPage(e('main-content'))">${m[0].toUpperCase()+m.slice(1)}</button>`).join('')}
+      </div>
+      ${lrMode==='bulanan'?`<select class="inp" onchange="lrBulan=this.value;renderLabaRugiPage(e('main-content'))" style="width:180px;padding:5px 8px;font-size:13px;font-weight:600">
+        ${bulanList.map(b=>`<option value="${b}" ${b===lrBulan?'selected':''}>${LB(b)}</option>`).join('')}</select>`:''}
+      ${lrMode==='tahunan'?`<select class="inp" onchange="lrBulan=this.value+'-01';renderLabaRugiPage(e('main-content'))" style="width:100px;padding:5px 8px;font-size:13px;font-weight:600">
+        ${thnList.map(y=>`<option value="${y}" ${lrBulan.startsWith(y)?'selected':''}>${y}</option>`).join('')}</select>`:''}
+      ${lrMode==='kustom'?`<input type="date" class="inp" value="${lrFrom}" onchange="lrFrom=this.value;renderLabaRugiPage(e('main-content'))" style="width:140px;padding:5px 8px;font-size:12px">
+        <span style="color:var(--text2)">s/d</span>
+        <input type="date" class="inp" value="${lrTo}" onchange="lrTo=this.value;renderLabaRugiPage(e('main-content'))" style="width:140px;padding:5px 8px;font-size:12px">`:''}
+      <div style="margin-left:auto;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:12px;color:var(--text2)">Jumlah Owner:
+          <input type="number" min="1" max="10" value="${lrJumlahOwner}" onchange="lrJumlahOwner=parseInt(this.value)||1;renderLabaRugiPage(e('main-content'))" class="inp" style="width:55px;padding:4px 6px;font-size:12px;margin-left:4px"></label>
+        <label style="font-size:12px;color:var(--text2)">Dividen %:
+          <input type="number" min="0" max="100" value="${lrDividenPct}" onchange="lrDividenPct=parseFloat(this.value)||0;renderLabaRugiPage(e('main-content'))" class="inp" style="width:55px;padding:4px 6px;font-size:12px;margin-left:4px"></label>
+      </div>
+    </div>
+  </div>
+
+  <!-- SUMBER DATA -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-bottom:12px">
+    <div style="background:var(--blue-bg);border:1px solid var(--blue-light);border-radius:var(--radius);padding:10px 14px;font-size:12px">
+      <span style="font-weight:700;color:var(--blue)">📊 Sumber Pendapatan & Losses:</span>
+      <span style="color:var(--text2);margin-left:6px">Rekap Penjualan Bulanan — ${hariCount} hari, ${bulanCakupan.length} bulan</span>
+    </div>
+    <div style="background:var(--amber-bg);border:1px solid var(--amber-light);border-radius:var(--radius);padding:10px 14px;font-size:12px">
+      <span style="font-weight:700;color:var(--amber)">📝 Sumber Beban Usaha:</span>
+      <span style="color:var(--text2);margin-left:6px">Menu Beban Usaha — ${Object.values(bebanAkum).reduce((s,v)=>s+v,0)>0?fRF(Object.values(bebanAkum).reduce((s,v)=>s+v,0)):'Belum ada data'}</span>
+      <a href="#" onclick="showPage('beban');return false;" style="color:var(--blue);font-size:11px;margin-left:8px">→ Input Beban</a>
+    </div>
+  </div>
+
+  <!-- KPI CARDS -->
+  <div class="g4" style="gap:10px;margin-bottom:12px">
+    ${[
+      {l:'Pendapatan Kotor',v:pendapatanKotor,s:fN(totalJualLtr)+' ltr | '+hariCount+' hari',c:'var(--blue)'},
+      {l:'Laba Kotor',v:labaKotor,s:'Margin '+(pendapatanKotor>0?(labaKotor/pendapatanKotor*100).toFixed(1):0)+'%',c:'var(--green)'},
+      {l:'Laba / Rugi Usaha',v:labaRugiUsaha,s:'Setelah semua beban',c:labaRugiUsaha>=0?'var(--green)':'var(--red)'},
+      {l:'Laba Bersih / Owner',v:labaBersihPerOwner,s:lrJumlahOwner+' owner | dividen '+lrDividenPct+'%',c:'var(--purple)'}
+    ].map(c=>`<div class="card" style="padding:14px;border-top:3px solid ${c.c}">
+      <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${c.l}</div>
+      <div style="font-size:17px;font-weight:800;color:${c.c}">${c.v<0?'(':''}${fRF(Math.abs(c.v))}${c.v<0?')':''}</div>
+      <div style="font-size:11px;color:var(--text2)">${c.s}</div>
+    </div>`).join('')}
+  </div>
+
+  <!-- LAPORAN FORMAL -->
+  <div class="card" id="lr-print-area">
+    <!-- Header -->
+    <div style="text-align:center;padding:20px 16px 14px;border-bottom:2px solid var(--border2)">
+      <div style="font-size:17px;font-weight:800;color:var(--text)">${profil?.namaSPBU||'SPBU'}</div>
+      <div style="font-size:15px;font-weight:700;color:var(--text);margin-top:4px">LAPORAN LABA RUGI</div>
+      <div style="font-size:12px;color:var(--text2);margin-top:3px">Periode: ${labelPeriode}</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:2px">${hariCount} hari operasional &nbsp;|&nbsp; Dicetak: ${new Date().toLocaleDateString('id-ID',{dateStyle:'long'})}</div>
+    </div>
+
+    <div style="padding:0 4px">
+    <table style="width:100%;border-collapse:collapse">
+      <colgroup><col style="width:55%"><col style="width:10%"><col style="width:35%"></colgroup>
+      <tbody>
+
+      <!-- ════ A. PENDAPATAN USAHA ════ -->
+      ${rowH('A. PENDAPATAN USAHA','dari Rekap Penjualan Bulanan')}
+
+      <!-- Header sub-tabel produk -->
+      <tr style="background:var(--surface2)">
+        <td style="font-size:10px;font-weight:700;color:var(--text2);padding:5px 14px;text-transform:uppercase;letter-spacing:.05em">Produk</td>
+        <td style="font-size:10px;font-weight:700;color:var(--text2);text-align:right;padding:5px 8px">Volume (ltr)</td>
+        <td style="font-size:10px;font-weight:700;color:var(--text2);text-align:right;padding:5px 14px">Omzet</td>
+      </tr>
+      ${BBM.map(b=>`<tr>
+        <td style="padding:5px 14px 5px 28px;font-size:13px">
+          <span class="tag ${BT[b]}" style="font-size:11px">${BL[b]}</span>
+        </td>
+        <td style="text-align:right;font-size:12px;color:var(--text2);padding-right:8px">${fN(volBBM[b])}</td>
+        <td style="text-align:right;padding:5px 14px;font-size:13px">${fRF(omzetBBM[b])}</td>
+      </tr>`).join('')}
+      <tr style="background:var(--blue-bg)">
+        <td style="padding:6px 14px;font-weight:700;font-size:13px;color:var(--blue)">Total Penjualan BBM</td>
+        <td style="text-align:right;font-size:12px;color:var(--blue);font-weight:600;padding-right:8px">${fN(totalJualLtr)} ltr</td>
+        <td style="text-align:right;padding:6px 14px;font-weight:800;font-size:14px;color:var(--blue)">${fRF(pendapatanKotor)}</td>
+      </tr>
+      ${rowDiv()}
+      ${rowI('Harga Pokok Penjualan (HPP)',-hpp,{color:'var(--red)',note:'biaya pengadaan BBM'})}
+      ${rowDiv()}
+      ${rowT('LABA KOTOR',labaKotor,labaKotor>=0?'#2D6A2D':'#A32D2D')}
+
+      <!-- Sub-tabel laba per produk -->
+      ${rowSp()}
+      <tr style="background:var(--green-bg)">
+        <td colspan="3" style="font-size:11px;font-weight:700;color:var(--green);padding:6px 14px;text-transform:uppercase;letter-spacing:.05em">Laba Kotor per Produk (Margin)</td>
+      </tr>
+      <tr style="background:var(--surface2)">
+        <td style="font-size:10px;font-weight:700;color:var(--text2);padding:4px 14px;text-transform:uppercase">Produk</td>
+        <td style="font-size:10px;font-weight:700;color:var(--text2);text-align:right;padding:4px 8px">% Kontribusi</td>
+        <td style="font-size:10px;font-weight:700;color:var(--text2);text-align:right;padding:4px 14px">Laba Kotor</td>
+      </tr>
+      ${BBM.map(b=>{
+        const pct=labaKotor>0?(labaBBM[b]/labaKotor*100):0;
+        const marginLtr=volBBM[b]>0?(labaBBM[b]/volBBM[b]):0;
+        return`<tr>
+          <td style="padding:5px 14px 5px 28px;font-size:13px">
+            <span class="tag ${BT[b]}" style="font-size:11px">${BL[b]}</span>
+            <span style="font-size:10px;color:var(--text3);margin-left:6px">Rp ${fN(Math.round(marginLtr))}/ltr</span>
+          </td>
+          <td style="text-align:right;font-size:12px;padding-right:8px">
+            <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px">
+              <div style="width:50px;height:6px;background:var(--surface2);border-radius:3px;overflow:hidden">
+                <div style="width:${Math.min(100,pct)}%;height:100%;background:var(--green);border-radius:3px"></div>
+              </div>
+              <span style="color:var(--text2);font-size:11px">${pct.toFixed(1)}%</span>
+            </div>
+          </td>
+          <td style="text-align:right;padding:5px 14px;font-size:13px;font-weight:600;color:var(--green)">${fRF(labaBBM[b])}</td>
+        </tr>`;
+      }).join('')}
+      <tr style="background:var(--green-bg)">
+        <td style="padding:6px 14px;font-weight:700;font-size:13px;color:var(--green)">Total Laba Kotor</td>
+        <td style="text-align:right;font-size:11px;color:var(--green);padding-right:8px">100%</td>
+        <td style="text-align:right;padding:6px 14px;font-weight:800;font-size:14px;color:var(--green)">${fRF(labaKotor)}</td>
+      </tr>
+
+      <!-- ════ B. BEBAN USAHA ════ -->
+      ${rowSp()}
+      ${rowH('B. BEBAN USAHA','dari Menu Laporan Beban Usaha')}
+
+      ${rowI('1. Gaji & Upah',bebanAkum.gaji>0?-bebanAkum.gaji:null,{
+        color:bebanAkum.gaji>0?'var(--text)':'var(--text3)',
+        note:bebanAkum.gaji===0?'Belum ada data di Beban Usaha':''
+      })}
+      ${bebanDetail.gaji?.slice(0,3).map(i=>rowI('— '+esc(i.keterangan),null,{indent:1,note:'Rp '+fN(i.nominal)})).join('')||''}
+      ${(bebanDetail.gaji?.length||0)>3?rowI(`   ... dan ${bebanDetail.gaji.length-3} item lainnya`,null,{indent:1,note:'Rp '+fN(bebanAkum.gaji-(bebanDetail.gaji?.slice(0,3).reduce((s,i)=>s+i.nominal,0)||0))}):'' }
+
+      ${rowI('2. Beban Operasional',bebanAkum.operasional>0?-bebanAkum.operasional:null,{
+        color:bebanAkum.operasional>0?'var(--text)':'var(--text3)',
+        note:bebanAkum.operasional===0?'Belum ada data':''
+      })}
+      ${bebanDetail.operasional?.slice(0,2).map(i=>rowI('— '+esc(i.keterangan),null,{indent:1,note:'Rp '+fN(i.nominal)})).join('')||''}
+
+      ${rowI('3. Perawatan & Pemeliharaan',bebanAkum.perawatan>0?-bebanAkum.perawatan:null,{
+        color:bebanAkum.perawatan>0?'var(--text)':'var(--text3)',
+        note:bebanAkum.perawatan===0?'Belum ada data':''
+      })}
+
+      ${rowI('4. Administrasi & Umum',bebanAkum.administrasi>0?-bebanAkum.administrasi:null,{
+        color:bebanAkum.administrasi>0?'var(--text)':'var(--text3)',
+        note:bebanAkum.administrasi===0?'Belum ada data':''
+      })}
+
+      ${rowI('5. Beban Lain-lain',bebanAkum.lainnya>0?-bebanAkum.lainnya:null,{
+        color:bebanAkum.lainnya>0?'var(--text)':'var(--text3)',
+        note:bebanAkum.lainnya===0?'Belum ada data':''
+      })}
+
+      ${totalBebanUsaha===0?`<tr><td colspan="3" style="padding:8px 14px;font-size:12px">
+        <div style="background:var(--amber-bg);border:1px solid var(--amber-light);border-radius:6px;padding:8px 12px;color:var(--amber)">
+          ⚠ Belum ada data beban usaha. 
+          <a href="#" onclick="showPage('beban');return false;" style="color:var(--blue);font-weight:600">Klik di sini untuk input beban →</a>
+        </div>
+      </td></tr>`:''}
+
+      ${rowDiv()}
+      ${rowT('JUMLAH BEBAN USAHA',-totalBebanUsaha,'#A32D2D')}
+
+      <!-- ════ C. SELISIH STOK ════ -->
+      ${rowSp()}
+      ${rowH('C. LOSSES & PLUS BBM','dari Rekap Penjualan Bulanan')}
+      ${rowI('Kerugian Losses BBM',lossesRp>0?-lossesRp:null,{
+        color:lossesRp>0?'var(--red)':'var(--text3)',
+        note:lossesLtr>0?fN(lossesLtr)+' ltr':'Nihil'
+      })}
+      ${rowI('Keuntungan Plus BBM',plusRp>0?plusRp:null,{
+        color:plusRp>0?'var(--purple)':'var(--text3)',
+        note:plusLtr>0?fN(plusLtr)+' ltr':'Nihil'
+      })}
+      ${rowI('Neto Selisih Stok',netoSelisih!==0?netoSelisih:null,{
+        color:netoSelisih>=0?'var(--purple)':'var(--red)',
+        bold:true,
+        note:netoSelisih>=0?'surplus':'defisit'
+      })}
+      ${rowDiv()}
+
+      <!-- ════ LABA / RUGI USAHA ════ -->
+      ${rowSp()}
+      ${rowT('LABA / RUGI USAHA',labaRugiUsaha,labaRugiUsaha>=0?'#2D6A2D':'#A32D2D',true)}
+
+      <!-- ════ D. DISTRIBUSI ════ -->
+      ${rowSp()}
+      ${rowH('D. DISTRIBUSI LABA')}
+      ${rowI('Laba / Rugi Usaha (dasar perhitungan)',labaRugiUsaha,{color:labaRugiUsaha>=0?'var(--green)':'var(--red)'})}
+      <tr style="background:var(--amber-bg)">
+        <td style="padding:7px 14px;font-size:13px;color:var(--amber);font-weight:600">
+          Dividen ${lrDividenPct}%
+          <span style="font-size:11px;font-weight:400;margin-left:6px;color:var(--text2)">(${lrDividenPct}% × ${fRF(labaRugiUsaha>0?labaRugiUsaha:0)})</span>
+        </td>
+        <td style="text-align:right;font-size:11px;padding-right:8px;color:var(--text3)">${labaRugiUsaha>0?'dialokasikan':'tidak ada dividen saat rugi'}</td>
+        <td style="text-align:right;padding:7px 14px;font-size:14px;font-weight:800;color:${labaRugiUsaha>0?'var(--amber)':'var(--text3)'}">
+          ${labaRugiUsaha>0?fRF(dividen):'—'}
+        </td>
+      </tr>
+      ${rowDiv()}
+      ${rowT('LABA SETELAH DIVIDEN',labaSetelahDividen,'#185FA5')}
+
+      ${rowSp()}
+      ${rowH('E. BAGI HASIL OWNER')}
+      ${rowI('Dibagi '+lrJumlahOwner+' owner',null,{note:'masing-masing 1/'+lrJumlahOwner+' bagian'})}
+      ${Array.from({length:lrJumlahOwner},(_,i)=>rowI('Owner '+(i+1),labaBersihPerOwner,{
+        color:labaBersihPerOwner>=0?'var(--purple)':'var(--red)',
+        bold:true
+      })).join('')}
+      ${rowDiv()}
+      ${rowT('TOTAL LABA BERSIH OWNER',labaSetelahDividen,labaSetelahDividen>=0?'#534AB7':'#A32D2D',true)}
+
+      </tbody>
+    </table>
+    </div>
+
+    <!-- Footer tanda tangan -->
+    <div style="padding:16px;border-top:1px solid var(--border);margin-top:8px;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:16px">
+      <div style="font-size:11px;color:var(--text3)">
+        Sumber data: Rekap Penjualan + Laporan Beban Usaha, SPBU Manager<br>
+        Periode: ${fTgl(tglFrom)} s/d ${fTgl(tglTo)} | ${hariCount} hari operasional
+      </div>
+      <div style="display:flex;gap:50px;font-size:11px">
+        <div style="text-align:center"><div style="width:130px;border-top:1px solid var(--text);padding-top:4px;margin-top:36px">Mengetahui,</div><div style="color:var(--text2)">Owner</div></div>
+        <div style="text-align:center"><div style="width:130px;border-top:1px solid var(--text);padding-top:4px;margin-top:36px">Dibuat oleh,</div><div style="color:var(--text2)">Manager</div></div>
+      </div>
+    </div>
+  </div>
+  `;
+}
+
+function printLabaRugi(){
+  const area=e('lr-print-area');if(!area){toast('Tidak ada data.');return;}
+  const w=window.open('','_blank','width=900,height=700');
+  w.document.write(`<html><head><title>Laporan Laba Rugi</title>
+  <style>*{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Times New Roman',serif;font-size:12px;color:#000;padding:24px 32px}
+  table{width:100%;border-collapse:collapse}
+  td{padding:4px 10px;vertical-align:middle}
+  a{display:none}
+  @media print{button{display:none}a{display:none}@page{margin:1.5cm}}
+  </style></head><body>`+area.innerHTML+`</body></html>`);
+  w.document.close();setTimeout(()=>w.print(),600);
+}
+
+
+
+function renderRekapPage(main){
+  if(!state.savedData.length){
+    main.innerHTML=`<div class="page-header"><div class="page-title">Rekap & Laporan</div></div><div class="card"><div class="empty-state">Belum ada data tersimpan untuk ditampilkan.</div></div>`;
+    return;
+  }
+
+  // Ambil daftar bulan yang tersedia
+  const bulanList=[...new Set(state.savedData.map(d=>d.tanggal.slice(0,7)))].sort().reverse();
+  const selBulan=e('rekap-filter-bulan')?e('rekap-filter-bulan').value:bulanList[0];
+  const selFrom=e('rekap-from')?e('rekap-from').value:'';
+  const selTo=e('rekap-to')?e('rekap-to').value:'';
+
+  let filterVal=null;
+  if(rekapMode==='bulanan')filterVal=selBulan||bulanList[0];
+  else if(rekapMode==='custom')filterVal={from:selFrom,to:selTo};
+
+  const {rows,summary}=getRekapData(rekapMode,filterVal);
+  const allData=getRekapData('harian',null);
+
+  // Labels bulan
+  const bulanLabel=v=>{const[y,m]=v.split('-');const bln=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];return bln[parseInt(m)-1]+' '+y;};
+
+  // Summary cards
+  const avgHari=summary.hari>0?(summary.labaBersih/summary.hari):0;
+  const marginPct=summary.omzet>0?(summary.labaKotor/summary.omzet*100):0;
+
+  // Tabel per periode
+  const tabelRows=rows.map(r=>{
+    const keyLabel=rekapMode==='bulanan'?bulanLabel(r.key):r.key;
+    const margin=r.omzet>0?(r.labaKotor/r.omzet*100):0;
+    const lbPct=r.omzet>0?(r.labaBersih/r.omzet*100):0;
+    return`<tr onclick="toggleRekapDetail('rd-${r.key.replace(/ /g,'_')}')" style="cursor:pointer">
+      <td style="font-weight:600">${keyLabel}</td>
+      <td>${r.hariCount} hari</td>
+      <td>${fN(r.jual)} ltr</td>
+      <td>${fR(r.omzet)}</td>
+      <td style="color:var(--green)">${fR(r.labaKotor)}</td>
+      <td style="color:var(--red)">-${fRF(r.biaya)}</td>
+      <td style="color:var(--red)">${r.lossesRp>0?'-'+fRF(r.lossesRp):'—'}</td>
+      <td style="color:var(--purple)">${r.plusRp>0?'+'+fRF(r.plusRp):'—'}</td>
+      <td style="font-weight:700;color:${r.labaBersih>=0?'var(--green)':'var(--red)'}">${fRF(r.labaBersih)}</td>
+      <td style="color:${lbPct>=0?'var(--green)':'var(--red)'}">${lbPct.toFixed(1)}%</td>
+    </tr>
+    <tr id="rd-${r.key.replace(/ /g,'_')}" style="display:none">
+      <td colspan="10" style="padding:0">
+        <div style="background:var(--surface2);padding:14px 20px;border-top:1px solid var(--border)">
+          <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:10px;text-transform:uppercase;letter-spacing:.06em">Detail BBM — ${keyLabel}</div>
+          <div class="g4" style="gap:10px">
+          ${BBM.map(b=>`<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px">
+            <div style="font-size:11px;font-weight:700;margin-bottom:6px"><span class="tag ${BT[b]}">${BL[b]}</span></div>
+            <div style="font-size:12px;color:var(--text2)">Volume: <strong>${fN(r.bbmVol[b])} ltr</strong></div>
+            <div style="font-size:12px;color:var(--green)">Omzet: ${fR(r.bbmOmzet[b])}</div>
+            <div style="font-size:12px;color:var(--text2)">Laba: <strong style="color:${r.bbmLaba[b]>=0?'var(--green)':'var(--red)'}">${fRF(r.bbmLaba[b])}</strong></div>
+            ${r.bbmLosses[b]>0?`<div style="font-size:11px;color:var(--red)">Losses: ${fN(r.bbmLosses[b])} ltr</div>`:''}
+            ${r.bbmPlus[b]>0?`<div style="font-size:11px;color:var(--purple)">Plus: +${fN(r.bbmPlus[b])} ltr</div>`:''}
+          </div>`).join('')}
+          </div>
+          ${r.hariCount>1?`<div style="margin-top:10px;font-size:12px;color:var(--text2)">Rata-rata laba/hari: <strong style="color:var(--green)">${fRF(r.labaBersih/r.hariCount)}</strong></div>`:''}
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  // Chart data — trend 30 hari terakhir
+  const last30=[...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1).slice(-30);
+  const chartLabs=last30.map(d=>d.tanggal.slice(5));
+  const chartLaba=last30.map(d=>d.labaBersih);
+  const chartOmzet=last30.map(d=>d.totalOmzet);
+
+  // BBM volume pie — hitung langsung dari savedData
+  const bbmTotalVol=BBM.map(b=>{
+    let vol=0;
+    state.savedData.forEach(d=>{
+      d.shifts.forEach(sh=>{const sd=d.shiftData[sh]?.[b]||{};vol+=(sd.jual||0)+(sd.plus||0);});
+    });
+    return vol;
+  });
+
+  // Per-BBM laba data (all time)
+  const bbmLabaAll=BBM.map(b=>{
+    let total=0;
+    state.savedData.forEach(d=>{
+      const hSnap=d.hargaSnapshot||null;
+      const hj=hSnap?hSnap[b]:gHJ(b);
+      const hpp=hSnap?hSnap['hpp_'+b]:gHPP(b);
+      d.shifts.forEach(sh=>{const sd=d.shiftData[sh]?.[b]||{};total+=(sd.jual||0)*(hj-hpp);});
+    });
+    return Math.max(0,total);
+  });
+
+  main.innerHTML=`
+  <div class="page-header">
+    <div class="page-title">Rekap & Laporan</div>
+    <div class="page-sub">Rekapitulasi penjualan, keuntungan, dan analisis lengkap</div>
+  </div>
+
+  <!-- FILTER BAR -->
+  <div class="card" style="padding:14px 20px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-size:12px;font-weight:700;color:var(--text2)">PERIODE:</span>
+      <div class="snav" style="margin:0">
+        ${['harian','mingguan','bulanan','custom'].map(m=>`<button class="snav-btn${rekapMode===m?' active':''}" onclick="rekapMode='${m}';renderRekapPage(e('main-content'))">${cap(m)}</button>`).join('')}
+      </div>
+      ${rekapMode==='bulanan'?`<select class="inp" id="rekap-filter-bulan" onchange="renderRekapPage(e('main-content'))" style="width:140px;padding:5px 8px;font-size:12px">
+        ${bulanList.map(b=>`<option value="${b}"${b===(selBulan||bulanList[0])?' selected':''}>${bulanLabel(b)}</option>`).join('')}
+      </select>`:''}
+      ${rekapMode==='custom'?`<input type="date" class="inp" id="rekap-from" value="${selFrom}" onchange="renderRekapPage(e('main-content'))" style="width:130px;padding:5px 8px;font-size:12px">
+        <span style="font-size:12px;color:var(--text2)">s/d</span>
+        <input type="date" class="inp" id="rekap-to" value="${selTo}" onchange="renderRekapPage(e('main-content'))" style="width:130px;padding:5px 8px;font-size:12px">`:''}
+      <button class="btn btn-ghost btn-sm" onclick="exportRekapCSV()" style="margin-left:auto">📥 Export CSV</button>
+      <button class="btn btn-primary btn-sm" onclick="printRekap()">🖨 Print</button>
+    </div>
+  </div>
+
+  <!-- SUMMARY METRICS -->
+  <div class="g4" id="rekap-metrics">
+    <div class="metric" style="border-color:var(--blue-light);background:var(--blue-bg)">
+      <div class="metric-label">Total Hari Data</div>
+      <div class="metric-value c-blue">${summary.hari}</div>
+      <div class="metric-sub">hari tercatat</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Total Volume</div>
+      <div class="metric-value">${fN(summary.jual)}</div>
+      <div class="metric-sub">liter terjual</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Total Omzet</div>
+      <div class="metric-value">${fR(summary.omzet)}</div>
+      <div class="metric-sub">pendapatan kotor</div>
+    </div>
+    <div class="metric" style="border-color:var(--green-light);background:var(--green-bg)">
+      <div class="metric-label">Total Laba Bersih</div>
+      <div class="metric-value ${summary.labaBersih>=0?'c-green':'c-red'}">${fR(summary.labaBersih)}</div>
+      <div class="metric-sub">setelah biaya & losses</div>
+    </div>
+  </div>
+  <div class="g4" style="margin-top:-8px">
+    <div class="metric">
+      <div class="metric-label">Total Laba Kotor</div>
+      <div class="metric-value c-green">${fR(summary.labaKotor)}</div>
+      <div class="metric-sub">margin BBM</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Total Biaya Operasional</div>
+      <div class="metric-value c-red">${fR(summary.biaya)}</div>
+      <div class="metric-sub">pengeluaran</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Total Losses</div>
+      <div class="metric-value c-red">${summary.losses>0?'-'+fN(summary.losses)+' ltr':'-'}</div>
+      <div class="metric-sub">${summary.lossesRp>0?'-'+fRF(summary.lossesRp):''}</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Avg Laba/Hari</div>
+      <div class="metric-value ${avgHari>=0?'c-green':'c-red'}">${fR(avgHari)}</div>
+      <div class="metric-sub">rata-rata per hari</div>
+    </div>
+  </div>
+  <div class="g4" style="margin-top:-8px">
+    <div class="metric">
+      <div class="metric-label">Margin Kotor</div>
+      <div class="metric-value ${marginPct>=0?'c-green':'c-red'}">${marginPct.toFixed(2)}%</div>
+      <div class="metric-sub">laba kotor / omzet</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Laba Bersih / Omzet</div>
+      <div class="metric-value ${summary.omzet>0?(summary.labaBersih/summary.omzet*100)>=0?'c-green':'c-red':''}">
+        ${summary.omzet>0?(summary.labaBersih/summary.omzet*100).toFixed(2)+'%':'—'}</div>
+      <div class="metric-sub">net profit margin</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Total Plus</div>
+      <div class="metric-value c-purple">${summary.plus>0?'+'+fN(summary.plus)+' ltr':'-'}</div>
+      <div class="metric-sub">${summary.plusRp>0?'+'+fRF(summary.plusRp):''}</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Laba Bersih/Liter</div>
+      <div class="metric-value ${summary.jual>0?(summary.labaBersih/summary.jual)>=0?'c-green':'c-red':''}">
+        ${summary.jual>0?fRF(summary.labaBersih/summary.jual)+'/ltr':'—'}</div>
+      <div class="metric-sub">efisiensi per liter</div>
+    </div>
+  </div>
+
+  <!-- CHART TREN -->
+  <div class="card">
+    <div class="card-title">📈 Tren Laba Bersih & Omzet (30 Hari Terakhir)</div>
+    <div style="position:relative;width:100%;height:200px"><canvas id="rekapChart1"></canvas></div>
+  </div>
+
+  <!-- CHART BBM -->
+  <div class="g2">
+    <div class="card">
+      <div class="card-title">🛢 Volume Penjualan per BBM (All Time)</div>
+      <div style="position:relative;width:100%;height:200px"><canvas id="rekapChart2"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">💰 Kontribusi Laba per BBM (All Time)</div>
+      <div style="position:relative;width:100%;height:200px"><canvas id="rekapChart3"></canvas></div>
+    </div>
+  </div>
+
+  <!-- TABEL REKAP PER PERIODE -->
+  <div class="card">
+    <div class="card-title">
+      📋 Tabel Rekap ${rekapMode==='bulanan'?'per Bulan':rekapMode==='mingguan'?'per Minggu':rekapMode==='custom'?'Periode Kustom':'Harian'}
+      <span style="font-size:11px;font-weight:400;color:var(--text3)">${rows.length} periode — klik baris untuk detail BBM</span>
+    </div>
+    <div class="tbl-wrap" id="rekap-tabel">
+      <table>
+        <thead><tr>
+          <th style="text-align:left">Periode</th>
+          <th>Hari</th>
+          <th>Volume (ltr)</th>
+          <th>Omzet</th>
+          <th style="color:var(--green)">Laba Kotor</th>
+          <th style="color:var(--red)">Biaya</th>
+          <th style="color:var(--red)">Losses 🔒</th>
+          <th style="color:var(--purple)">Plus 🔒</th>
+          <th>Laba Bersih</th>
+          <th>Margin</th>
+        </tr></thead>
+        <tbody>${tabelRows}</tbody>
+        <tfoot>
+          <tr>
+            <td>TOTAL</td>
+            <td>${summary.hari}</td>
+            <td>${fN(summary.jual)} ltr</td>
+            <td>${fR(summary.omzet)}</td>
+            <td style="color:var(--green)">${fR(summary.labaKotor)}</td>
+            <td style="color:var(--red)">-${fRF(summary.biaya)}</td>
+            <td style="color:var(--red)">${summary.lossesRp>0?'-'+fRF(summary.lossesRp):'—'}</td>
+            <td style="color:var(--purple)">${summary.plusRp>0?'+'+fRF(summary.plusRp):'—'}</td>
+            <td style="color:${summary.labaBersih>=0?'var(--green)':'var(--red)'}">${fRF(summary.labaBersih)}</td>
+            <td style="color:${summary.omzet>0?(summary.labaBersih/summary.omzet*100)>=0?'var(--green)':'var(--red)':''}">
+              ${summary.omzet>0?(summary.labaBersih/summary.omzet*100).toFixed(1)+'%':'—'}
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  </div>
+
+  <!-- REKAP PER BBM ALL TIME -->
+  <div class="card">
+    <div class="card-title">🛢 Rekap Per BBM (Semua Data)</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th style="text-align:left">BBM</th>
+          <th>Total Volume</th>
+          <th>Porsi Volume</th>
+          <th>Total Omzet</th>
+          <th>Total Laba</th>
+          <th>Total Losses</th>
+          <th>Total Plus</th>
+          <th>Laba/Liter</th>
+        </tr></thead>
+        <tbody>
+        ${BBM.map(b=>{
+          let vol=0;state.savedData.forEach(d=>{d.shifts.forEach(sh=>{const sd=d.shiftData[sh]?.[b]||{};vol+=(sd.jual||0)+(sd.plus||0);});});
+          const totalVol=bbmTotalVol.reduce((s,v)=>s+v,0)||1;
+          const pct=(vol/totalVol*100).toFixed(1);
+          let omzBBM=0,labBBM=0,lossBBM=0,plusBBM=0;
+          state.savedData.forEach(d=>{
+            const hSnap=d.hargaSnapshot||null;
+            const hj=hSnap?hSnap[b]:gHJ(b);
+            const hpp=hSnap?hSnap['hpp_'+b]:gHPP(b);
+            d.shifts.forEach(sh=>{
+              const sd=d.shiftData[sh]?.[b]||{};
+              const v=(sd.jual||0)+(sd.plus||0);
+              omzBBM+=v*hj;labBBM+=v*(hj-hpp);
+              lossBBM+=sd.losses||0;plusBBM+=sd.plus||0;
+            });
+          });
+          return`<tr>
+            <td><span class="tag ${BT[b]}">${BL[b]}</span></td>
+            <td>${fN(vol)} ltr</td>
+            <td>
+              <div style="display:flex;align-items:center;gap:6px">
+                <div style="flex:1;background:var(--border);border-radius:4px;height:6px;min-width:60px">
+                  <div style="width:${pct}%;background:var(--blue);height:6px;border-radius:4px"></div>
+                </div>
+                <span style="font-size:11px;font-weight:600">${pct}%</span>
+              </div>
+            </td>
+            <td>${fR(omzBBM)}</td>
+            <td style="color:${labBBM>=0?'var(--green)':'var(--red)'};font-weight:600">${fRF(labBBM)}</td>
+            <td style="color:var(--red)">${lossBBM>0?fN(lossBBM)+' ltr':'—'}</td>
+            <td style="color:var(--purple)">${plusBBM>0?'+'+fN(plusBBM)+' ltr':'—'}</td>
+            <td style="color:var(--text2);font-size:12px">${vol>0?fRF(labBBM/vol)+'/ltr':'—'}</td>
+          </tr>`;
+        }).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ANALISIS -->
+  <div class="g2">
+    <div class="card">
+      <div class="card-title">📅 Hari Terbaik (Top 5)</div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th style="text-align:left">Tanggal</th><th style="text-align:left">Hari</th><th>Laba Bersih</th></tr></thead>
+        <tbody>
+        ${[...state.savedData].sort((a,b)=>b.labaBersih-a.labaBersih).slice(0,5).map((d,i)=>`
+          <tr>
+            <td><span style="font-size:11px;color:var(--text3);margin-right:4px">#${i+1}</span>${d.tanggal}</td>
+            <td>${d.hari||'—'}</td>
+            <td style="color:var(--green);font-weight:700">${fRF(d.labaBersih)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>
+    </div>
+    <div class="card">
+      <div class="card-title">📉 Hari Terburuk (Bottom 5)</div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th style="text-align:left">Tanggal</th><th style="text-align:left">Hari</th><th>Laba Bersih</th></tr></thead>
+        <tbody>
+        ${[...state.savedData].sort((a,b)=>a.labaBersih-b.labaBersih).slice(0,5).map((d,i)=>`
+          <tr>
+            <td><span style="font-size:11px;color:var(--text3);margin-right:4px">#${i+1}</span>${d.tanggal}</td>
+            <td>${d.hari||'—'}</td>
+            <td style="color:var(--red);font-weight:700">${fRF(d.labaBersih)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <!-- REKAP HARI DALAM SEMINGGU -->
+  <div class="card">
+    <div class="card-title">📆 Rata-rata Performa per Hari dalam Seminggu</div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th style="text-align:left">Hari</th><th>Jml Data</th><th>Avg Volume</th><th>Avg Omzet</th><th>Avg Laba Bersih</th><th>Losses</th></tr></thead>
+      <tbody>
+      ${['Senin','Selasa','Rabu','Kamis','Jumat','Sabtu','Minggu'].map(hari=>{
+        const rec=state.savedData.filter(d=>d.hari===hari);
+        if(!rec.length)return`<tr><td>${hari}</td><td colspan="5" style="color:var(--text3);font-size:12px">Belum ada data</td></tr>`;
+        const n=rec.length;
+        const avgVol=rec.reduce((s,d)=>s+(d.totalJual||0),0)/n;
+        const avgOmz=rec.reduce((s,d)=>s+(d.totalOmzet||0),0)/n;
+        const avgLaba=rec.reduce((s,d)=>s+(d.labaBersih||0),0)/n;
+        const totLoss=rec.reduce((s,d)=>s+(d.tLRp||0),0);
+        return`<tr>
+          <td style="font-weight:600">${hari}</td>
+          <td>${n} hari</td>
+          <td>${fN(Math.round(avgVol))} ltr</td>
+          <td>${fR(Math.round(avgOmz))}</td>
+          <td style="color:${avgLaba>=0?'var(--green)':'var(--red)'};font-weight:700">${fRF(Math.round(avgLaba))}</td>
+          <td style="color:var(--red);font-size:12px">${totLoss>0?'-'+fRF(totLoss):'—'}</td>
+        </tr>`;
+      }).join('')}
+      </tbody>
+    </table></div>
+  </div>`;
+
+  // Render charts
+  setTimeout(()=>{
+    // Chart 1: Trend laba & omzet
+    const ctx1=e('rekapChart1');
+    if(ctx1&&window.Chart){
+      if(rekapChart1)rekapChart1.destroy();
+      rekapChart1=new Chart(ctx1,{type:'bar',data:{labels:chartLabs,datasets:[
+        {label:'Omzet',data:chartOmzet,backgroundColor:'rgba(24,95,165,.15)',borderColor:'rgba(24,95,165,.6)',borderWidth:1,yAxisID:'y2'},
+        {label:'Laba Bersih',data:chartLaba,backgroundColor:chartLaba.map(v=>v>=0?'rgba(45,106,45,.7)':'rgba(163,45,45,.7)'),borderRadius:3,borderSkipped:false,yAxisID:'y1'}
+      ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{font:{size:11}}}},scales:{y1:{type:'linear',position:'left',ticks:{callback:v=>fR(v),font:{size:10}}},y2:{type:'linear',position:'right',ticks:{callback:v=>fR(v),font:{size:10}},grid:{drawOnChartArea:false}}}}});
+    }
+    // Chart 2: Volume per BBM (doughnut)
+    const ctx2=e('rekapChart2');
+    if(ctx2&&window.Chart){
+      if(rekapChart2)rekapChart2.destroy();
+      rekapChart2=new Chart(ctx2,{type:'doughnut',data:{labels:BBM.map(b=>BL[b]),datasets:[{data:bbmTotalVol,backgroundColor:['#2D6A2D','#185FA5','#854F0B','#534AB7'],borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right',labels:{font:{size:11}}},tooltip:{callbacks:{label:c=>`${c.label}: ${fN(c.parsed)} ltr`}}}}});
+    }
+    // Chart 3: Laba per BBM (bar)
+    const ctx3=e('rekapChart3');
+    if(ctx3&&window.Chart){
+      if(rekapChart3)rekapChart3.destroy();
+      rekapChart3=new Chart(ctx3,{type:'bar',data:{labels:BBM.map(b=>BL[b]),datasets:[{label:'Laba',data:bbmLabaAll,backgroundColor:['rgba(45,106,45,.7)','rgba(24,95,165,.7)','rgba(133,79,11,.7)','rgba(83,74,183,.7)'],borderRadius:5,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fRF(c.parsed.y)}}},scales:{y:{ticks:{callback:v=>fR(v),font:{size:10}}}}}});
+    }
+  },100);
+}
+
+function toggleRekapDetail(id){
+  const el=e(id);if(!el)return;
+  el.style.display=el.style.display==='none'?'table-row':'none';
+}
+
+function exportRekapCSV(){
+  if(!state.savedData.length){toast('Tidak ada data untuk diekspor!');return;}
+  const rows=[[
+    'Tanggal','Hari','Shift','Volume (ltr)','Omzet (Rp)','Laba Kotor (Rp)',
+    'Biaya Operasional (Rp)','Losses (ltr)','Losses (Rp)','Plus (ltr)','Plus (Rp)','Laba Bersih (Rp)',
+    ...BBM.flatMap(b=>[`${BL[b]} Volume`,`${BL[b]} Losses`,`${BL[b]} Plus`])
+  ]];
+  [...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1).forEach(d=>{
+    const bbmData=BBM.flatMap(b=>{
+      let vol=0,loss=0,plus=0;
+      d.shifts.forEach(sh=>{const sd=d.shiftData[sh]?.[b]||{};vol+=(sd.jual||0)+(sd.plus||0);loss+=sd.losses||0;plus+=sd.plus||0;});
+      return[vol,loss,plus];
+    });
+    rows.push([
+      d.tanggal,d.hari||'',d.shifts.map(s=>cap(s)).join('+'),
+      d.totalJual||0,d.totalOmzet||0,d.totalMargin||0,
+      d.ops||0,
+      d.tLRp?Math.round(d.tLRp/gHJ('pertalite')):0,d.tLRp||0,
+      d.tPRp?Math.round(d.tPRp/gHJ('pertalite')):0,d.tPRp||0,
+      d.labaBersih||0,...bbmData
+    ]);
+  });
+  const csv=rows.map(r=>r.map(v=>typeof v==='string'&&v.includes(',')?`"${v}"`:v).join(',')).join('\n');
+  const blob=new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;
+  a.download=`rekap_spbu_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();URL.revokeObjectURL(url);
+  toast('✓ CSV berhasil diunduh!');
+}
+
+function printRekap(){
+  const tabel=e('rekap-tabel');
+  if(!tabel){toast('Tidak ada data untuk dicetak.');return;}
+  const now=new Date().toLocaleString('id-ID');
+  const n=state.savedData.length;
+  const ad=getRekapData('harian',null);
+  const s=ad.summary;
+  const profil=getProfil();
+  const css='*{box-sizing:border-box;margin:0;padding:0}body{font-family:sans-serif;font-size:12px;padding:20px;color:#1A1916}h1{font-size:18px;margin-bottom:2px}h2{font-size:13px;font-weight:400;color:#6B6760;margin-bottom:4px}.sub{color:#6B6760;margin-bottom:20px;font-size:11px}.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}.metric{border:1px solid #E4E0D8;border-radius:8px;padding:12px}.metric-label{font-size:10px;text-transform:uppercase;color:#A09C95;font-weight:700;margin-bottom:4px}.metric-value{font-size:16px;font-weight:700}table{width:100%;border-collapse:collapse;font-size:11px;margin-top:12px}th{background:#F1EFE9;padding:6px 8px;text-align:right;border-bottom:2px solid #E4E0D8;font-size:10px;text-transform:uppercase}th:first-child{text-align:left}td{padding:5px 8px;text-align:right;border-bottom:1px solid #E4E0D8}td:first-child{text-align:left;font-weight:600}tfoot td{font-weight:700;background:#F1EFE9;border-top:2px solid #E4E0D8}@media print{body{padding:10px}}';
+  let body='<h1>'+(profil.nama||'SPBU')+'</h1>';
+  body+='<h2>No. SPBU: '+(profil.noSpbu||'-')+'</h2>';
+  body+='<div class="sub">Laporan Rekap &nbsp;|&nbsp; Dicetak: '+now+' &nbsp;|&nbsp; Total data: '+n+' hari</div>';
+  body+='<div class="g4">';
+  body+='<div class="metric"><div class="metric-label">Total Hari</div><div class="metric-value">'+n+'</div></div>';
+  body+='<div class="metric"><div class="metric-label">Total Omzet</div><div class="metric-value">'+fR(s.omzet)+'</div></div>';
+  body+='<div class="metric"><div class="metric-label">Total Laba Kotor</div><div class="metric-value">'+fR(s.labaKotor)+'</div></div>';
+  body+='<div class="metric"><div class="metric-label">Total Laba Bersih</div><div class="metric-value">'+fR(s.labaBersih)+'</div></div>';
+  body+='</div>';
+  body+=tabel.innerHTML;
+  const w=window.open('','_blank');
+  w.document.write('<!DOCTYPE html><html><head><title>Rekap SPBU</title><style>'+css+'</style></head><body>'+body+'</body></html>');
+  w.document.close();
+  setTimeout(()=>w.print(),500);
+}
+
+// ════════════════════════════════════════════════════════════
+// PAGE: KELOLA PENGGUNA (OWNER ONLY)
+// ════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════
+//  MANAJEMEN PRODUK BBM
+// ═══════════════════════════════════════════════════════════════
+let pgProdukEdit = null; // id produk yang sedang diedit
+
+const TAG_OPTIONS = [
+  {val:'tp', label:'Hijau',  color:'#2D6A2D', bg:'#EAF3DE'},
+  {val:'tx', label:'Biru',   color:'#185FA5', bg:'#E6F1FB'},
+  {val:'td', label:'Kuning', color:'#854F0B', bg:'#FAEEDA'},
+  {val:'tb', label:'Ungu',   color:'#534AB7', bg:'#EEEDFE'},
+  {val:'tm', label:'Merah',  color:'#A32D2D', bg:'#FCEAEA'},
+  {val:'tn', label:'Abu',    color:'#5F5E5A', bg:'#F1EFE8'},
+];
+
+function renderTabProduk(){
+  const cfg=loadBBMConfig();
+
+  const tagOpts=TAG_OPTIONS.map(t=>
+    `<option value="${t.val}">${t.label}</option>`
+  ).join('');
+
+  const editItem=pgProdukEdit!=null?cfg.find(p=>p.id===pgProdukEdit):null;
+
+  const daftarProduk=cfg.map((p,i)=>{
+    const tag=TAG_OPTIONS.find(t=>t.val===p.tag)||TAG_OPTIONS[0];
+    const aktif=p.aktif!==false;
+    const isDefault=['pertalite','pertamax','dexlite','biosolar'].includes(p.id);
+    return`<div style="background:var(--surface);border:1px solid ${pgProdukEdit===p.id?'var(--blue)':'var(--border)'};border-radius:var(--radius-lg);padding:14px 16px;${!aktif?'opacity:.6':''}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:10px;height:32px;border-radius:3px;background:${tag.color}"></div>
+          <div>
+            <div style="font-weight:700;font-size:14px">${esc(p.label)}</div>
+            <div style="font-size:11px;color:var(--text2)">ID: ${p.id} &nbsp;·&nbsp;
+              <span class="tag ${p.tag}" style="font-size:10px">${esc(p.label)}</span>
+              ${!aktif?'<span style="color:var(--red);font-size:10px;margin-left:4px">● Nonaktif</span>':''}
+              ${isDefault?'<span style="font-size:10px;color:var(--text3);margin-left:4px">Produk bawaan</span>':''}
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button class="btn btn-ghost btn-sm" onclick="pgProdukEdit='${p.id}';pgTab='produk';renderPengaturanPage(e('main-content'))" style="font-size:11px">✏ Edit</button>
+          <button class="btn btn-ghost btn-sm" onclick="pgToggleProduk('${p.id}')" style="font-size:11px;color:${aktif?'var(--amber)':'var(--green)'}">
+            ${aktif?'⊘ Nonaktifkan':'✓ Aktifkan'}
+          </button>
+          ${!isDefault?`<button class="btn btn-del btn-sm" onclick="pgHapusProduk('${p.id}')" style="font-size:11px">🗑</button>`:''}
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:12px">
+        <div style="background:var(--surface2);padding:8px;border-radius:6px">
+          <div style="color:var(--text3);font-size:10px;text-transform:uppercase">Harga Jual</div>
+          <div style="font-weight:700">Rp ${fN(state.harga[p.id]||p.hj||0)}</div>
+        </div>
+        <div style="background:var(--surface2);padding:8px;border-radius:6px">
+          <div style="color:var(--text3);font-size:10px;text-transform:uppercase">HPP</div>
+          <div style="font-weight:700">Rp ${fN(state.harga['hpp_'+p.id]||((p.hj||0)-(p.mg||0)))}</div>
+        </div>
+        <div style="background:var(--green-bg);padding:8px;border-radius:6px">
+          <div style="color:var(--text3);font-size:10px;text-transform:uppercase">Margin</div>
+          <div style="font-weight:700;color:var(--green)">Rp ${fN((state.harga[p.id]||p.hj||0)-(state.harga['hpp_'+p.id]||((p.hj||0)-(p.mg||0))))}/ltr</div>
+        </div>
+      </div>
+      <div style="margin-top:8px;font-size:11px;color:var(--text2)">
+        Batas stok rendah: <strong>${fN(p.batas||1000)} ltr</strong>
+        &nbsp;|&nbsp; Urutan: ${i+1}
+        <button onclick="pgNaikProduk(${i})" ${i===0?'disabled':''} style="background:none;border:none;cursor:pointer;padding:0 4px;color:var(--text2)">▲</button>
+        <button onclick="pgTurunProduk(${i})" ${i===cfg.length-1?'disabled':''} style="background:none;border:none;cursor:pointer;padding:0 4px;color:var(--text2)">▼</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  return`
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">⛽ Daftar Produk BBM</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;margin-bottom:12px">
+      ${daftarProduk}
+    </div>
+    <div style="padding:8px 12px;background:var(--surface2);border-radius:var(--radius);font-size:11px;color:var(--text2)">
+      💡 Produk bawaan (Pertalite, Pertamax, Dexlite, Biosolar) tidak bisa dihapus tapi bisa dinonaktifkan.
+      Perubahan harga tetap dikelola di menu <strong>Harga BBM</strong>.
+    </div>
+  </div>
+
+  <!-- Form tambah/edit produk -->
+  <div class="card" style="border:2px solid var(--blue-light)">
+    <div class="card-title" style="color:var(--blue)">${editItem?'✏ Edit — '+esc(editItem.label):'➕ Tambah Produk BBM Baru'}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:14px">
+      <div class="fg">
+        <label>Nama Produk</label>
+        <input type="text" class="inp" id="pg-bbm-label" value="${esc(editItem?.label||'')}" placeholder="cth: Pertamax Turbo">
+      </div>
+      <div class="fg">
+        <label>ID (huruf kecil, tanpa spasi)</label>
+        <input type="text" class="inp" id="pg-bbm-id" value="${editItem?.id||''}"
+          placeholder="cth: pertamax_turbo" ${editItem?'readonly style="opacity:.6"':''}
+          oninput="this.value=this.value.toLowerCase().replace(/[^a-z0-9_]/g,'')">
+      </div>
+      <div class="fg">
+        <label>Warna Badge</label>
+        <select class="inp" id="pg-bbm-tag">
+          ${TAG_OPTIONS.map(t=>`<option value="${t.val}" ${editItem?.tag===t.val?'selected':''}>${t.label}</option>`).join('')}
+        </select>
+      </div>
+      <div class="fg">
+        <label>Harga Jual (Rp)</label>
+        <input type="text" class="inp inp-num" id="pg-bbm-hj" value="${editItem?fN(state.harga[editItem.id]||editItem.hj||0):''}" placeholder="0" oninput="fmtB(this)">
+      </div>
+      <div class="fg">
+        <label>Margin / ltr (Rp)</label>
+        <input type="text" class="inp inp-num" id="pg-bbm-mg" value="${editItem?fN((state.harga[editItem.id]||editItem.hj||0)-(state.harga['hpp_'+editItem.id]||((editItem.hj||0)-(editItem.mg||0)))):''}" placeholder="0" oninput="fmtB(this)">
+      </div>
+      <div class="fg">
+        <label>Batas Stok Rendah (ltr)</label>
+        <input type="text" class="inp inp-num" id="pg-bbm-batas" value="${editItem?fN(editItem.batas||1000):''}" placeholder="1000" oninput="fmtB(this)">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      ${editItem?`<button class="btn btn-ghost" onclick="pgProdukEdit=null;renderPengaturanPage(e('main-content'))">Batal</button>`:''}
+      <button class="btn btn-primary" onclick="${editItem?`pgSimpanProduk('${editItem.id}')`:'pgTambahProduk()'}">
+        💾 ${editItem?'Simpan Perubahan':'Tambah Produk'}
+      </button>
+    </div>
+  </div>`;
+}
+
+function pgTambahProduk(){
+  const label=(e('pg-bbm-label')?.value||'').trim();
+  const id=(e('pg-bbm-id')?.value||'').trim();
+  const tag=e('pg-bbm-tag')?.value||'tp';
+  const hj=parseInt((e('pg-bbm-hj')?.value||'0').replace(/\./g,''))||0;
+  const mg=parseInt((e('pg-bbm-mg')?.value||'0').replace(/\./g,''))||0;
+  const batas=parseInt((e('pg-bbm-batas')?.value||'1000').replace(/\./g,''))||1000;
+
+  if(!label){toast('⚠ Nama produk wajib diisi!');return;}
+  if(!id){toast('⚠ ID produk wajib diisi!');return;}
+  if(hj<=0){toast('⚠ Harga jual harus lebih dari 0!');return;}
+
+  const cfg=loadBBMConfig();
+  if(cfg.find(p=>p.id===id)){toast('⚠ ID produk sudah ada!');return;}
+
+  cfg.push({id,label,tag,batas,hj,mg,aktif:true});
+  saveBBMConfig(cfg);
+
+  // Tambah ke state.harga
+  state.harga[id]=hj;
+  state.harga['hpp_'+id]=hj-mg;
+  saveHargaLocal();
+  dbSave();
+
+  toast('✓ Produk "'+label+'" berhasil ditambahkan!');
+  pgProdukEdit=null;
+  renderPengaturanPage(e('main-content'));
+}
+
+function pgSimpanProduk(id){
+  const cfg=loadBBMConfig();
+  const idx=cfg.findIndex(p=>p.id===id);
+  if(idx<0){toast('⚠ Produk tidak ditemukan!');return;}
+
+  const label=(e('pg-bbm-label')?.value||'').trim();
+  const tag=e('pg-bbm-tag')?.value||cfg[idx].tag;
+  const hj=parseInt((e('pg-bbm-hj')?.value||'0').replace(/\./g,''))||0;
+  const mg=parseInt((e('pg-bbm-mg')?.value||'0').replace(/\./g,''))||0;
+  const batas=parseInt((e('pg-bbm-batas')?.value||'1000').replace(/\./g,''))||1000;
+
+  if(!label){toast('⚠ Nama produk wajib diisi!');return;}
+  if(hj<=0){toast('⚠ Harga jual harus lebih dari 0!');return;}
+
+  cfg[idx]={...cfg[idx],label,tag,batas,hj,mg};
+  saveBBMConfig(cfg);
+
+  // Update harga
+  state.harga[id]=hj;
+  state.harga['hpp_'+id]=hj-mg;
+  saveHargaLocal();
+  dbSave();
+
+  toast('✓ Produk "'+label+'" berhasil diperbarui!');
+  pgProdukEdit=null;
+  renderPengaturanPage(e('main-content'));
+}
+
+function pgToggleProduk(id){
+  const cfg=loadBBMConfig();
+  const p=cfg.find(x=>x.id===id);
+  if(!p)return;
+  p.aktif=!(p.aktif!==false);
+  saveBBMConfig(cfg);
+  toast((p.aktif?'✓ Aktifkan':'⊘ Nonaktifkan')+' produk '+p.label);
+  renderPengaturanPage(e('main-content'));
+}
+
+function pgHapusProduk(id){
+  const isDefault=['pertalite','pertamax','dexlite','biosolar'].includes(id);
+  if(isDefault){toast('⚠ Produk bawaan tidak bisa dihapus. Nonaktifkan saja.');return;}
+  const cfg=loadBBMConfig();
+  const p=cfg.find(x=>x.id===id);
+  if(!p)return;
+  if(!confirm('Hapus produk "'+p.label+'"?\nData historis yang sudah tersimpan tidak akan terhapus.'))return;
+  saveBBMConfig(cfg.filter(x=>x.id!==id));
+  toast('✓ Produk dihapus.');
+  renderPengaturanPage(e('main-content'));
+}
+
+function pgNaikProduk(idx){
+  const cfg=loadBBMConfig();
+  if(idx<=0)return;
+  [cfg[idx-1],cfg[idx]]=[cfg[idx],cfg[idx-1]];
+  saveBBMConfig(cfg);
+  renderPengaturanPage(e('main-content'));
+}
+
+function pgTurunProduk(idx){
+  const cfg=loadBBMConfig();
+  if(idx>=cfg.length-1)return;
+  [cfg[idx],cfg[idx+1]]=[cfg[idx+1],cfg[idx]];
+  saveBBMConfig(cfg);
+  renderPengaturanPage(e('main-content'));
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+//  PENGATURAN
+// ═══════════════════════════════════════════════════════════════
+let pgTab = 'profil'; // 'profil' | 'users' | 'keamanan'
+
+function renderPengaturanPage(main){
+  if(!main)return;
+  const users=getUsers();
+  const profil=getProfil();
+  const editId=window._pgEditUserId||null;
+  const editUser=editId?users.find(u=>u.id===editId):null;
+
+  // ── Tab Profil SPBU ─────────────────────────────────────
+  const tabProfil=`
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">🏢 Profil SPBU</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px">
+      <div class="fg">
+        <label>Nama SPBU</label>
+        <input type="text" class="inp" id="pg-nama" value="${esc(profil.nama||profil.namaSPBU||'')}" placeholder="cth: SPBU 34.123.01 Mataram">
+      </div>
+      <div class="fg">
+        <label>No. SPBU</label>
+        <input type="text" class="inp" id="pg-nospbu" value="${esc(profil.noSpbu||'')}" placeholder="cth: 34.123.01">
+      </div>
+      <div class="fg">
+        <label>Alamat</label>
+        <input type="text" class="inp" id="pg-alamat" value="${esc(profil.alamat||'')}" placeholder="Alamat lengkap SPBU">
+      </div>
+      <div class="fg">
+        <label>No. Telepon</label>
+        <input type="text" class="inp" id="pg-telp" value="${esc(profil.telp||'')}" placeholder="cth: 0370-xxxxxx">
+      </div>
+      <div class="fg">
+        <label>Nama Pemilik / Owner</label>
+        <input type="text" class="inp" id="pg-owner" value="${esc(profil.owner||'')}" placeholder="Nama pemilik SPBU">
+      </div>
+      <div class="fg">
+        <label>Email</label>
+        <input type="text" class="inp" id="pg-email" value="${esc(profil.email||'')}" placeholder="email@spbu.com">
+      </div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-primary" onclick="savePengaturanProfil()">💾 Simpan Profil</button>
+    </div>
+  </div>`;
+
+  // ── Tab Kelola Pengguna ─────────────────────────────────
+  const menuChecks=ALL_MENUS.map(m=>{
+    const checked=editUser?(editUser.menuAccess||[]).includes(m.id):MANAGER_DEFAULT_MENUS.includes(m.id);
+    const isOwner=editUser?.role==='owner';
+    return`<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:${checked?'var(--blue-bg)':'var(--surface2)'};border:1px solid ${checked?'var(--blue-light)':'var(--border)'};border-radius:8px;cursor:pointer;transition:all .15s">
+      <input type="checkbox" id="pgmenu-${m.id}" ${checked?'checked':''} ${isOwner?'disabled':''} style="accent-color:var(--blue);width:14px;height:14px" onchange="this.closest('label').style.background=this.checked?'var(--blue-bg)':'var(--surface2)';this.closest('label').style.borderColor=this.checked?'var(--blue-light)':'var(--border)'">
+      <span style="font-size:15px">${m.icon}</span>
+      <span style="font-size:12px;font-weight:600">${m.label}</span>
+    </label>`;
+  }).join('');
+
+  const userCardList=users.map(u=>{
+    const isOwner=u.role==='owner';
+    const isActive=u.id===currentUser?.id;
+    const menus=isOwner?ALL_MENUS:ALL_MENUS.filter(m=>(u.menuAccess||[]).includes(m.id));
+    return`<div style="background:var(--surface);border:1px solid ${isActive?'var(--blue)':'var(--border)'};border-radius:var(--radius-lg);padding:14px 16px;${isActive?'box-shadow:0 0 0 2px var(--blue-light)':''}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:36px;height:36px;border-radius:50%;background:${isOwner?'var(--amber-bg)':'var(--blue-bg)'};display:flex;align-items:center;justify-content:center;font-size:18px">
+            ${isOwner?'👑':'🔧'}
+          </div>
+          <div>
+            <div style="font-weight:700;font-size:14px">${esc(u.name)}${isActive?'<span style="font-size:10px;background:var(--blue);color:#fff;padding:1px 6px;border-radius:10px;margin-left:6px">Anda</span>':''}</div>
+            <div style="font-size:11px;color:var(--text2)">ID: ${u.id} &nbsp;·&nbsp; <span style="font-weight:600;color:${isOwner?'var(--amber)':'var(--blue)'}">${isOwner?'Owner':'Manager'}</span></div>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-edit btn-sm" onclick="pgEditUser('${u.id}')">✏ Edit</button>
+          ${!isOwner?`<button class="btn btn-del btn-sm" onclick="pgDeleteUser('${u.id}')">🗑</button>`:''}
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px">Akses Menu</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px">
+          ${isOwner?'<span style="font-size:11px;color:var(--amber);font-weight:600">✓ Semua menu</span>':
+            menus.map(m=>`<span style="font-size:10px;background:var(--blue-bg);color:var(--blue);padding:2px 7px;border-radius:10px;border:1px solid var(--blue-light)">${m.icon} ${m.label}</span>`).join('')||'<span style="font-size:11px;color:var(--text3)">— Tidak ada akses</span>'}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  const tabUsers=`
+  <!-- Daftar user -->
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">👥 Daftar Pengguna
+      <button class="btn btn-primary btn-sm" onclick="window._pgEditUserId=null;pgTab='users';renderPengaturanPage(e('main-content'))">+ Tambah User</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr));gap:10px">
+      ${userCardList}
+    </div>
+  </div>
+
+  <!-- Form tambah/edit -->
+  <div class="card" style="border:2px solid var(--blue-light)">
+    <div class="card-title" style="color:var(--blue)">${editUser?`✏ Edit — ${esc(editUser.name)}`:'➕ Tambah Pengguna Baru'}</div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px">
+      <div class="fg">
+        <label>Nama Pengguna</label>
+        <input type="text" class="inp" id="pg-uname" placeholder="cth: Manager Pagi" value="${esc(editUser?.name||'')}">
+      </div>
+      <div class="fg">
+        <label>Role</label>
+        <select class="inp" id="pg-urole" onchange="renderPengaturanPage(e('main-content'));window._pgEditUserId='${editId||''}'" ${editUser?.role==='owner'?'disabled':''}>
+          <option value="manager" ${!editUser||editUser.role==='manager'?'selected':''}>🔧 Manager</option>
+          <option value="owner" ${editUser?.role==='owner'?'selected':''}>👑 Owner</option>
+        </select>
+      </div>
+      <div class="fg">
+        <label>${editUser?'Password Baru':'Password'} <span style="font-size:10px;color:var(--text3)">${editUser?'(kosong = tidak ganti)':''}</span></label>
+        <input type="password" class="inp" id="pg-upwd" placeholder="${editUser?'Kosongkan jika tidak ganti':'Min. 4 karakter'}">
+      </div>
+    </div>
+
+    <!-- Hak akses menu -->
+    <div style="margin-bottom:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em">
+          🔐 Hak Akses Menu
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-ghost btn-sm" onclick="pgSetAllMenus(true)" style="font-size:10px">✓ Semua</button>
+          <button class="btn btn-ghost btn-sm" onclick="pgSetAllMenus(false)" style="font-size:10px">✗ Hapus</button>
+          <button class="btn btn-ghost btn-sm" onclick="pgSetMenuPreset()" style="font-size:10px">↺ Default</button>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px">
+        ${menuChecks}
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      ${editUser?`<button class="btn btn-ghost" onclick="window._pgEditUserId=null;renderPengaturanPage(e('main-content'))">Batal</button>`:''}
+      <button class="btn btn-save" onclick="pgSaveUser('${editUser?.id||''}')">
+        💾 ${editUser?'Simpan Perubahan':'Tambah Pengguna'}
+      </button>
+    </div>
+  </div>`;
+
+  // ── Tab Keamanan ────────────────────────────────────────
+  // Ambil info lisensi untuk ditampilkan
+  const licInfo=checkLicenseStatus();
+  const bln2=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+  const fTglLic=t=>{if(!t||t==='PERMANENT')return'Permanen';const[y,m,d]=t.split('-');return d+' '+bln2[parseInt(m)-1]+' '+y;};
+
+  const tabKeamanan=`
+  <!-- Info Lisensi -->
+  <div class="card" style="margin-bottom:12px;border-left:4px solid ${licInfo.valid?'var(--green)':'var(--red)'}">
+    <div class="card-title">🔐 Status Lisensi</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:12px">
+      <div style="background:var(--surface2);padding:12px;border-radius:var(--radius)">
+        <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:4px">SPBU</div>
+        <div style="font-size:13px;font-weight:700">${licInfo.namaSpbu||'—'}</div>
+      </div>
+      <div style="background:var(--surface2);padding:12px;border-radius:var(--radius)">
+        <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:4px">Tipe</div>
+        <div style="font-size:13px;font-weight:700;text-transform:capitalize">${licInfo.tipe||'—'}</div>
+      </div>
+      <div style="background:var(--surface2);padding:12px;border-radius:var(--radius)">
+        <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:4px">Berlaku Hingga</div>
+        <div style="font-size:13px;font-weight:700">${fTglLic(licInfo.expiry)}</div>
+      </div>
+      <div style="background:${licInfo.sisaHari>7?'var(--green-bg)':licInfo.sisaHari>0?'var(--amber-bg)':'var(--red-bg)'};padding:12px;border-radius:var(--radius)">
+        <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;margin-bottom:4px">Sisa</div>
+        <div style="font-size:13px;font-weight:700;color:${licInfo.sisaHari>7?'var(--green)':licInfo.sisaHari>0?'var(--amber)':'var(--red)'}">
+          ${licInfo.sisaHari>=9999?'Permanen':licInfo.sisaHari+' hari'}
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <a href="https://wa.me/62${KONTAK_ORDER.replace(/^0/,'')}" target="_blank"
+        class="btn btn-primary btn-sm">💬 Perpanjang / Upgrade</a>
+      <button class="btn btn-ghost btn-sm" onclick="if(confirm('Reset lisensi? Anda perlu input kode aktivasi lagi.')){localStorage.removeItem('${LIC_KEY}');location.reload()}">
+        ↺ Reset Lisensi
+      </button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">🔑 Ganti Password Saya</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+      <div class="fg">
+        <label>Password Lama</label>
+        <input type="password" class="inp" id="sec-old" placeholder="Password saat ini">
+      </div>
+      <div class="fg">
+        <label>Password Baru</label>
+        <input type="password" class="inp" id="sec-new" placeholder="Min. 4 karakter">
+      </div>
+      <div class="fg">
+        <label>Konfirmasi</label>
+        <input type="password" class="inp" id="sec-new2" placeholder="Ulangi password baru">
+      </div>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-primary" onclick="pgGantiPassword()">🔑 Ganti Password</button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">🔒 Sesi & Keamanan</div>
+    <div style="display:grid;gap:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--surface2);border-radius:var(--radius)">
+        <div>
+          <div style="font-weight:600;font-size:13px">Pengguna Aktif</div>
+          <div style="font-size:12px;color:var(--text2)">${esc(currentUser?.name||'—')} · ${currentUser?.role==='owner'?'👑 Owner':'🔧 Manager'}</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="doLogout()">Logout</button>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--red-bg);border:1px solid var(--red-light,#F7C1C1);border-radius:var(--radius)">
+        <div>
+          <div style="font-weight:600;font-size:13px;color:var(--red)">Reset Semua Sesi Login</div>
+          <div style="font-size:11px;color:var(--text2)">Hapus semua sesi — semua pengguna akan diminta login ulang</div>
+        </div>
+        <button class="btn btn-danger btn-sm" onclick="if(confirm('Reset semua sesi? Semua pengguna akan logout.')){localStorage.removeItem('spbu_auth_session');localStorage.removeItem('spbu_users');localStorage.removeItem('spbu_passwords');location.reload()}">Reset Sesi</button>
+      </div>
+    </div>
+  </div>`;
+
+  // ── Render halaman ──────────────────────────────────────
+  const tabs=[
+    {id:'profil',  icon:'🏢', label:'Profil SPBU'},
+    {id:'produk',  icon:'⛽', label:'Produk BBM'},
+    {id:'users',   icon:'👥', label:'Kelola Pengguna'},
+    {id:'keamanan',icon:'🔐', label:'Keamanan'},
+  ];
+
+  main.innerHTML=`
+  <div class="page-header">
+    <div><div class="page-title">⚙ Pengaturan</div>
+    <div class="page-sub">Kelola profil, pengguna, dan keamanan aplikasi</div></div>
+  </div>
+
+  <!-- TABS -->
+  <div style="display:flex;gap:2px;background:var(--surface2);padding:4px;border-radius:var(--radius-lg);margin-bottom:16px;width:fit-content">
+    ${tabs.map(t=>`<button onclick="pgTab='${t.id}';renderPengaturanPage(e('main-content'))"
+      style="padding:8px 18px;border-radius:var(--radius);font-size:13px;font-weight:600;border:none;cursor:pointer;transition:all .15s;
+        background:${pgTab===t.id?'var(--surface)':'transparent'};
+        color:${pgTab===t.id?'var(--text)':'var(--text2)'};
+        box-shadow:${pgTab===t.id?'var(--shadow)':'none'}">
+      ${t.icon} ${t.label}
+    </button>`).join('')}
+  </div>
+
+  <!-- KONTEN TAB -->
+  ${pgTab==='profil'?tabProfil:pgTab==='produk'?renderTabProduk():pgTab==='users'?tabUsers:tabKeamanan}
+  `;
+}
+
+// ── Aksi Profil ──────────────────────────────────────────
+function savePengaturanProfil(){
+  const nama=(e('pg-nama')?.value||'').trim();
+  const noSpbu=(e('pg-nospbu')?.value||'').trim();
+  const alamat=(e('pg-alamat')?.value||'').trim();
+  const telp=(e('pg-telp')?.value||'').trim();
+  const owner=(e('pg-owner')?.value||'').trim();
+  const email=(e('pg-email')?.value||'').trim();
+  if(!nama){toast('⚠ Nama SPBU tidak boleh kosong!');return;}
+  saveProfil({nama,namaSPBU:nama,noSpbu,alamat,telp,owner,email});
+  toast('✓ Profil SPBU disimpan!');
+  const brandEl=document.querySelector('.topbar-brand');
+  if(brandEl)brandEl.textContent=nama||'SPBU Manager';
+  if(_fbInited) fbSaveAppState().catch(()=>{});
+}
+
+// ── Aksi User ────────────────────────────────────────────
+function pgEditUser(id){
+  window._pgEditUserId=id;
+  pgTab='users';
+  renderPengaturanPage(e('main-content'));
+  setTimeout(()=>{
+    const users=getUsers();
+    const u=users.find(x=>x.id===id);
+    if(u)ALL_MENUS.forEach(m=>{
+      const el=e('pgmenu-'+m.id);
+      if(el)el.checked=u.role==='owner'?true:(u.menuAccess||[]).includes(m.id);
+    });
+  },30);
+}
+
+function pgDeleteUser(id){
+  const users=getUsers();
+  const u=users.find(x=>x.id===id);
+  if(!u||u.role==='owner'){toast('⚠ Tidak bisa menghapus akun Owner!');return;}
+  if(!confirm(`Hapus pengguna "${u.name}"? Tindakan ini tidak bisa dibatalkan.`))return;
+  saveUsers(users.filter(x=>x.id!==id));
+  toast('✓ Pengguna dihapus.');
+  window._pgEditUserId=null;
+  renderPengaturanPage(e('main-content'));
+}
+
+function pgSetAllMenus(val){
+  ALL_MENUS.forEach(m=>{
+    const el=e('pgmenu-'+m.id);
+    if(el&&!el.disabled){
+      el.checked=val;
+      el.closest('label').style.background=val?'var(--blue-bg)':'var(--surface2)';
+      el.closest('label').style.borderColor=val?'var(--blue-light)':'var(--border)';
+    }
+  });
+}
+
+function pgSetMenuPreset(){
+  ALL_MENUS.forEach(m=>{
+    const el=e('pgmenu-'+m.id);
+    if(el&&!el.disabled){
+      const val=MANAGER_DEFAULT_MENUS.includes(m.id);
+      el.checked=val;
+      el.closest('label').style.background=val?'var(--blue-bg)':'var(--surface2)';
+      el.closest('label').style.borderColor=val?'var(--blue-light)':'var(--border)';
+    }
+  });
+}
+
+function pgSaveUser(existingId){
+  const name=(e('pg-uname')?.value||'').trim();
+  const role=e('pg-urole')?.value||'manager';
+  const pwd=e('pg-upwd')?.value||'';
+  if(!name){toast('⚠ Nama pengguna tidak boleh kosong!');return;}
+  if(!existingId&&!pwd){toast('⚠ Password wajib diisi!');return;}
+  if(pwd&&pwd.length<4){toast('⚠ Password minimal 4 karakter!');return;}
+  const menuAccess=ALL_MENUS.filter(m=>{const el=e('pgmenu-'+m.id);return el&&el.checked;}).map(m=>m.id);
+  if(role==='manager'&&menuAccess.length===0){toast('⚠ Pilih minimal 1 menu!');return;}
+  const users=getUsers();
+  if(existingId){
+    const idx=users.findIndex(u=>u.id===existingId);
+    if(idx<0){toast('⚠ Pengguna tidak ditemukan!');return;}
+    users[idx].name=name;
+    users[idx].role=role;
+    users[idx].menuAccess=role==='owner'?OWNER_DEFAULT_MENUS:menuAccess;
+    if(pwd)users[idx].password=pwd;
+    saveUsers(users);
+    // Update currentUser jika edit diri sendiri
+    if(currentUser?.id===existingId){
+      currentUser.name=name;
+      currentUser.menuAccess=users[idx].menuAccess;
+      localStorage.setItem(AUTH_KEY,JSON.stringify(currentUser));
+      buildSidebar();
+    }
+    toast('✓ Perubahan disimpan untuk '+name);
+  }else{
+    users.push({id:'user_'+Date.now(),role,name,password:pwd,menuAccess:role==='owner'?OWNER_DEFAULT_MENUS:menuAccess});
+    saveUsers(users);
+    toast('✓ Pengguna "'+name+'" berhasil ditambahkan!');
+  }
+  window._pgEditUserId=null;
+  renderPengaturanPage(e('main-content'));
+}
+
+// ── Aksi Keamanan ────────────────────────────────────────
+function pgGantiPassword(){
+  const oldPwd=e('sec-old')?.value||'';
+  const newPwd=e('sec-new')?.value||'';
+  const newPwd2=e('sec-new2')?.value||'';
+  if(!currentUser){toast('⚠ Tidak ada pengguna aktif.');return;}
+  const users=getUsers();
+  const u=users.find(x=>x.id===currentUser.id);
+  if(!u){toast('⚠ Pengguna tidak ditemukan.');return;}
+  if(u.password!==oldPwd){toast('⚠ Password lama tidak sesuai!');return;}
+  if(!newPwd||newPwd.length<4){toast('⚠ Password baru minimal 4 karakter!');return;}
+  if(newPwd!==newPwd2){toast('⚠ Konfirmasi password tidak cocok!');return;}
+  u.password=newPwd;
+  saveUsers(users);
+  currentUser.password=newPwd;
+  localStorage.setItem(AUTH_KEY,JSON.stringify(currentUser));
+  toast('✓ Password berhasil diperbarui!');
+  if(e('sec-old'))e('sec-old').value='';
+  if(e('sec-new'))e('sec-new').value='';
+  if(e('sec-new2'))e('sec-new2').value='';
+}
+
+
+function renderUsersPage(main){
+  const users=getUsers();
+  const editId=window._editUserId||null;
+
+  const userRows=users.map(u=>{
+    const isOwner=u.role==='owner';
+    const menuCount=(u.menuAccess||[]).length;
+    const badgeClass=isOwner?'role-owner':'role-manager';
+    const badgeText=isOwner?'👑 Owner':'🔧 Manager';
+    return`<tr>
+      <td>
+        <div style="font-weight:600">${esc(u.name)}</div>
+        <div style="font-size:11px;color:var(--text3)">ID: ${u.id}</div>
+      </td>
+      <td><span class="role-badge ${badgeClass}" style="font-size:11px">${badgeText}</span></td>
+      <td style="font-size:12px;color:var(--text2)">${isOwner?'Semua menu':menuCount+' menu'}</td>
+      <td style="font-size:12px">
+        <span style="background:var(--surface2);border:1px solid var(--border);padding:3px 8px;border-radius:6px;font-family:monospace;font-size:11px;letter-spacing:.05em">
+          ${'•'.repeat(Math.min(u.password.length,8))}
+        </span>
+      </td>
+      <td>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-edit btn-sm" onclick="editUser('${u.id}')">✏ Edit</button>
+          ${!isOwner?`<button class="btn btn-reset btn-sm" onclick="deleteUser('${u.id}')">🗑 Hapus</button>`:''}
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+
+  // Form tambah/edit
+  const editUser=editId?users.find(u=>u.id===editId):null;
+  const formTitle=editUser?`Edit Pengguna — ${esc(editUser.name)}`:'Tambah Pengguna Baru';
+  const menuChecks=ALL_MENUS.map(m=>{
+    const checked=editUser?(editUser.menuAccess||[]).includes(m.id):MANAGER_DEFAULT_MENUS.includes(m.id);
+    return`<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;cursor:pointer;font-size:13px">
+      <input type="checkbox" id="menu-${m.id}" ${checked?'checked':''} style="accent-color:var(--blue);width:14px;height:14px">
+      <span style="margin-right:4px">${m.icon}</span> ${m.label}
+    </label>`;
+  }).join('');
+
+  main.innerHTML=`
+  <div class="page-header">
+    <div class="page-title">👥 Kelola Pengguna</div>
+    <div class="page-sub">Tambah, edit, dan atur hak akses menu untuk setiap pengguna</div>
+  </div>
+
+  <!-- DAFTAR PENGGUNA -->
+  <div class="card">
+    <div class="card-title">Daftar Pengguna
+      <button class="btn btn-primary btn-sm" onclick="window._editUserId=null;renderUsersPage(e('main-content'))">+ Tambah User</button>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr>
+        <th style="text-align:left">Nama</th>
+        <th style="text-align:left">Role</th>
+        <th>Akses Menu</th>
+        <th>Password</th>
+        <th>Aksi</th>
+      </tr></thead>
+      <tbody>${userRows}</tbody>
+    </table></div>
+  </div>
+
+  <!-- FORM TAMBAH / EDIT -->
+  <div class="card" style="border:2px solid var(--blue-light)">
+    <div class="card-title" style="color:var(--blue)">${editUser?'✏':'+'} ${formTitle}</div>
+
+    <div class="form-row cols-2" style="margin-bottom:14px">
+      <div class="fg">
+        <label>Nama Pengguna</label>
+        <input type="text" class="inp" id="user-name" placeholder="cth: Manager Pagi" value="${esc(editUser?.name||'')}">
+      </div>
+      <div class="fg">
+        <label>Role</label>
+        <select class="inp" id="user-role" onchange="renderUsersPage(e('main-content'))" ${editUser?.role==='owner'?'disabled':''}>
+          <option value="manager" ${!editUser||editUser.role==='manager'?'selected':''}>🔧 Manager</option>
+          <option value="owner" ${editUser?.role==='owner'?'selected':''}>👑 Owner</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-row cols-2" style="margin-bottom:18px">
+      <div class="fg">
+        <label>${editUser?'Password Baru (kosongkan jika tidak berubah)':'Password'}</label>
+        <input type="password" class="inp" id="user-password" placeholder="${editUser?'Kosongkan jika tidak ganti':'Minimal 4 karakter'}">
+      </div>
+      <div class="fg">
+        <label>Konfirmasi Password</label>
+        <input type="password" class="inp" id="user-password2" placeholder="Ulangi password">
+      </div>
+    </div>
+
+    <div style="margin-bottom:16px">
+      <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">
+        🔐 Hak Akses Menu
+        <span style="font-size:10px;font-weight:400;color:var(--text3);margin-left:8px">Centang menu yang bisa diakses pengguna ini</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px">
+        ${menuChecks}
+      </div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button class="btn btn-ghost btn-sm" onclick="setAllMenus(true)">✓ Pilih Semua</button>
+        <button class="btn btn-ghost btn-sm" onclick="setAllMenus(false)">✗ Hapus Semua</button>
+        <button class="btn btn-ghost btn-sm" onclick="setMenuPreset('manager')">Set Default Manager</button>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      ${editUser?`<button class="btn btn-ghost" onclick="window._editUserId=null;renderUsersPage(e('main-content'))">Batal</button>`:''}
+      <button class="btn btn-save" onclick="saveUser('${editUser?.id||''}')">
+        💾 ${editUser?'Simpan Perubahan':'Tambah Pengguna'}
+      </button>
+    </div>
+  </div>`;
+
+  // Restore nilai dari form jika baru render ulang
+  if(editUser){
+    const roleEl=e('user-role');
+    if(roleEl)roleEl.value=editUser.role;
+  }
+}
+
+function setAllMenus(val){
+  ALL_MENUS.forEach(m=>{const el=e('menu-'+m.id);if(el)el.checked=val;});
+}
+function setMenuPreset(role){
+  ALL_MENUS.forEach(m=>{
+    const el=e('menu-'+m.id);
+    if(el)el.checked=MANAGER_DEFAULT_MENUS.includes(m.id);
+  });
+}
+
+function editUser(id){
+  window._editUserId=id;
+  renderUsersPage(e('main-content'));
+  setTimeout(()=>{
+    const users=getUsers();
+    const u=users.find(x=>x.id===id);
+    if(u){
+      ALL_MENUS.forEach(m=>{const el=e('menu-'+m.id);if(el)el.checked=(u.menuAccess||[]).includes(m.id);});
+    }
+  },50);
+}
+
+function deleteUser(id){
+  const users=getUsers();
+  const u=users.find(x=>x.id===id);
+  if(!u||u.role==='owner'){toast('⚠ Tidak bisa menghapus akun Owner!');return;}
+  if(!confirm(`Hapus pengguna "${u.name}"? Aksi ini tidak bisa dibatalkan.`))return;
+  const updated=users.filter(x=>x.id!==id);
+  saveUsers(updated);
+  toast('✓ Pengguna dihapus.');
+  window._editUserId=null;
+  renderUsersPage(e('main-content'));
+}
+
+function saveUser(existingId){
+  const name=(e('user-name')?.value||'').trim();
+  const role=e('user-role')?.value||'manager';
+  const pwd=e('user-password')?.value||'';
+  const pwd2=e('user-password2')?.value||'';
+
+  if(!name){toast('⚠ Nama pengguna tidak boleh kosong!');return;}
+  if(!existingId&&!pwd){toast('⚠ Password wajib diisi untuk pengguna baru!');return;}
+  if(pwd&&pwd.length<4){toast('⚠ Password minimal 4 karakter!');return;}
+  if(pwd&&pwd!==pwd2){toast('⚠ Password dan konfirmasi tidak sama!');return;}
+
+  // Kumpulkan menu access yang dicentang
+  const menuAccess=ALL_MENUS.filter(m=>{const el=e('menu-'+m.id);return el&&el.checked;}).map(m=>m.id);
+  if(role==='manager'&&menuAccess.length===0){toast('⚠ Pilih minimal 1 menu akses!');return;}
+
+  const users=getUsers();
+
+  if(existingId){
+    // Edit
+    const idx=users.findIndex(u=>u.id===existingId);
+    if(idx<0){toast('⚠ Pengguna tidak ditemukan!');return;}
+    users[idx].name=name;
+    users[idx].role=role;
+    users[idx].menuAccess=role==='owner'?OWNER_DEFAULT_MENUS:menuAccess;
+    if(pwd)users[idx].password=pwd;
+    saveUsers(users);
+    toast('✓ Perubahan disimpan untuk '+name);
+  }else{
+    // Tambah baru
+    const newId='user_'+Date.now();
+    users.push({
+      id:newId,role,name,password:pwd,
+      menuAccess:role==='owner'?OWNER_DEFAULT_MENUS:menuAccess
+    });
+    saveUsers(users);
+    toast('✓ Pengguna "'+name+'" berhasil ditambahkan!');
+  }
+  window._editUserId=null;
+  renderUsersPage(e('main-content'));
+}
+
+// ════════════════════════════════════════════════════════════
+// PAGE: LAPORAN KEUANGAN
+// ════════════════════════════════════════════════════════════
+let lapKeuMode='bulanan';
+
+function getLapKeuData(mode, filterVal){
+  if(!state.savedData.length) return null;
+
+  const all=[...state.savedData].sort((a,b)=>a.tanggal>b.tanggal?1:-1);
+
+  // Filter berdasarkan mode
+  let records=all;
+  if(mode==='bulanan'&&filterVal){
+    records=all.filter(d=>d.tanggal.slice(0,7)===filterVal);
+  }else if(mode==='custom'&&filterVal?.from&&filterVal?.to){
+    records=all.filter(d=>d.tanggal>=filterVal.from&&d.tanggal<=filterVal.to);
+  }else if(mode==='tahunan'&&filterVal){
+    records=all.filter(d=>d.tanggal.slice(0,4)===filterVal);
+  }
+
+  if(!records.length) return null;
+
+  // ── Pendapatan Usaha ──
+  // Omzet per BBM (harga jual × volume)
+  const pendapatanBBM={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+  let totalPendapatan=0;
+
+  // ── Beban Pokok Penjualan (HPP) ──
+  const hppBBM={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+  let totalHPP=0;
+
+  // ── Beban Operasional (non-gaji) ──
+  const bebanOpDetail={listrik:0,perawatan:0,administrasi:0,lainnya:0};
+  let totalBebanOp=0;
+
+  // ── Beban Gaji ──
+  let totalGaji=0;
+
+  // ── Losses & Plus ──
+  let totalLossesRp=0, totalPlusRp=0;
+  const lossesBBM={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+  const plusBBM={pertalite:0,pertamax:0,dexlite:0,biosolar:0};
+  let totalLossesLtr=0,totalPlusLtr=0;
+
+  records.forEach(d=>{
+    const hSnap=d.hargaSnapshot||null;
+    BBM.forEach(b=>{
+      const hj=hSnap?hSnap[b]:getHargaPadaTanggal(d.tanggal,b).hj;
+      const hpp=hSnap?hSnap['hpp_'+b]:getHargaPadaTanggal(d.tanggal,b).hpp;
+      let volJual=0,volLoss=0,volPlus=0;
+      d.shifts.forEach(sh=>{
+        const sd=d.shiftData[sh]?.[b]||{};
+        volJual+=(sd.jual||0)+(sd.plus||0);
+        volLoss+=sd.losses||0;
+        volPlus+=sd.plus||0;
+      });
+      pendapatanBBM[b]+=volJual*hj;
+      hppBBM[b]+=volJual*hpp;
+      lossesBBM[b]+=volLoss*hj;
+      plusBBM[b]+=volPlus*hj;
+      totalLossesLtr+=volLoss;
+      totalPlusLtr+=volPlus;
+    });
+
+    // Biaya dari biayaItems per record
+    (d.biayaItems||[]).forEach(item=>{
+      if(item.cat==='gaji'){
+        totalGaji+=item.nom;
+      }else{
+        bebanOpDetail[item.cat]=(bebanOpDetail[item.cat]||0)+item.nom;
+        totalBebanOp+=item.nom;
+      }
+    });
+
+    totalLossesRp+=d.tLRp||0;
+    totalPlusRp+=d.tPRp||0;
+  });
+
+  BBM.forEach(b=>{totalPendapatan+=pendapatanBBM[b];totalHPP+=hppBBM[b];});
+  const totalBebanTotal=totalGaji+totalBebanOp;
+
+  // ── Laba Kotor (Gross Profit) ──
+  const labaKotor=totalPendapatan-totalHPP;
+
+  // ── Laba Operasional (sebelum losses/plus) ──
+  const labaOperasional=labaKotor-totalBebanTotal;
+
+  // ── Laba Bersih (setelah losses & plus) ──
+  const labaBersih=labaOperasional-totalLossesRp+totalPlusRp;
+
+  // ── Dividen (10% dari laba bersih) ──
+  const dividen=Math.max(0,labaBersih*0.10);
+
+  // ── Laba Ditahan (setelah dividen) ──
+  const labaDitahan=labaBersih-dividen;
+
+  return{
+    records,periode:{mode,filterVal},
+    pendapatan:{detail:pendapatanBBM,total:totalPendapatan},
+    hpp:{detail:hppBBM,total:totalHPP},
+    labaKotor,
+    bebanGaji:totalGaji,
+    bebanOp:{detail:bebanOpDetail,total:totalBebanOp},
+    totalBeban:totalBebanTotal,
+    labaOperasional,
+    losses:{detail:lossesBBM,ltr:totalLossesLtr,rp:totalLossesRp},
+    plus:{detail:plusBBM,ltr:totalPlusLtr,rp:totalPlusRp},
+    labaBersih,
+    dividen,
+    labaDitahan,
+    hariCount:records.length,
+  };
+}
+
+function renderLapKeuPage(main){
+  if(!state.savedData.length){
+    main.innerHTML='<div class="page-header"><div class="page-title">Laporan Keuangan</div></div><div class="card"><div class="empty-state">Belum ada data untuk ditampilkan.</div></div>';
+    return;
+  }
+
+  const bulanList=[...new Set(state.savedData.map(d=>d.tanggal.slice(0,7)))].sort().reverse();
+  const tahunList=[...new Set(state.savedData.map(d=>d.tanggal.slice(0,4)))].sort().reverse();
+  const selBulan=e('lk-bulan')?e('lk-bulan').value:(bulanList[0]||'');
+  const selTahun=e('lk-tahun')?e('lk-tahun').value:(tahunList[0]||'');
+  const selFrom=e('lk-from')?e('lk-from').value:'';
+  const selTo=e('lk-to')?e('lk-to').value:'';
+
+  let filterVal=null;
+  if(lapKeuMode==='bulanan')filterVal=selBulan;
+  else if(lapKeuMode==='tahunan')filterVal=selTahun;
+  else if(lapKeuMode==='custom')filterVal={from:selFrom,to:selTo};
+
+  const d=getLapKeuData(lapKeuMode,filterVal);
+
+  const bnArr=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+  const bulanLabel=v=>{if(!v)return'';const p=v.split('-');return(bnArr[parseInt(p[1])-1]||p[1])+' '+p[0];};
+  const periodeLabel=lapKeuMode==='bulanan'?bulanLabel(selBulan):lapKeuMode==='tahunan'?'Tahun '+selTahun:(selFrom&&selTo?selFrom+' s/d '+selTo:'Semua');
+
+  if(!d){
+    main.innerHTML='<div class="page-header"><div class="page-title">Laporan Keuangan</div></div><div class="card"><div class="empty-state">Tidak ada data untuk periode yang dipilih.</div></div>';
+    return;
+  }
+
+  const grossMarginPct=d.pendapatan.total>0?(d.labaKotor/d.pendapatan.total*100):0;
+  const opMarginPct=d.pendapatan.total>0?(d.labaOperasional/d.pendapatan.total*100):0;
+  const netMarginPct=d.pendapatan.total>0?(d.labaBersih/d.pendapatan.total*100):0;
+
+  // Helper: format Rp dengan tanda kurung untuk negatif
+  const fmtRp=v=>v===null||v===undefined?'—':v<0?'('+fRF(Math.abs(v))+')':fRF(v);
+
+  // Build rows step by step
+  let rows='';
+
+  // Helper builders
+  const subhead=label=>'<tr class="lk-section"><td colspan="2">'+label+'</td></tr>';
+  const lineItem=(label,val,color,indent)=>{
+    indent=indent||0;
+    color=color||'';
+    const colorStyle=color==='pos'?'color:var(--green)':color==='neg'?'color:var(--red)':color==='neu'?'color:var(--purple)':'';
+    return '<tr class="lk-item"><td style="padding-left:'+(20+indent*16)+'px;'+colorStyle+'">'+label+'</td><td class="lk-num" style="'+colorStyle+'">'+fmtRp(val)+'</td></tr>';
+  };
+  const totalLine=(label,val,color,kind)=>{
+    color=color||'';
+    kind=kind||'single';
+    const colorStyle=color==='pos'?'color:var(--green)':color==='neg'?'color:var(--red)':color==='neu'?'color:var(--purple)':'';
+    return '<tr class="lk-total lk-'+kind+'"><td style="padding-left:16px;font-weight:700;'+colorStyle+'">'+label+'</td><td class="lk-num" style="font-weight:700;'+colorStyle+'">'+fmtRp(val)+'</td></tr>';
+  };
+  const marginLine=(label,pct,color)=>{
+    color=color||'';
+    const colorStyle=color==='pos'?'color:var(--green)':color==='neg'?'color:var(--red)':'color:var(--text2)';
+    return '<tr class="lk-margin"><td style="padding-left:36px;font-style:italic;'+colorStyle+'">'+label+'</td><td class="lk-num" style="font-style:italic;font-size:12px;'+colorStyle+'">'+pct.toFixed(2)+'%</td></tr>';
+  };
+  const sep='<tr class="lk-sep"><td colspan="2"></td></tr>';
+
+  // A. PENDAPATAN
+  rows+=subhead('A. PENDAPATAN USAHA');
+  BBM.forEach(b=>{rows+=lineItem('Penjualan '+BL[b],d.pendapatan.detail[b],'',1);});
+  rows+=totalLine('Total Pendapatan Usaha',d.pendapatan.total,'pos','single');
+  rows+=sep;
+
+  // B. HPP
+  rows+=subhead('B. BEBAN POKOK PENJUALAN (HPP)');
+  BBM.forEach(b=>{rows+=lineItem('HPP '+BL[b],-d.hpp.detail[b],'neg',1);});
+  rows+=totalLine('Total Beban Pokok',-d.hpp.total,'neg','single');
+  rows+=totalLine('LABA KOTOR',d.labaKotor,d.labaKotor>=0?'pos':'neg','double');
+  rows+=marginLine('Margin Laba Kotor',grossMarginPct,d.labaKotor>=0?'pos':'neg');
+  rows+=sep;
+
+  // C. BEBAN OPERASIONAL
+  rows+=subhead('C. BEBAN OPERASIONAL');
+  rows+=subhead('C.1 Beban Gaji & Upah');
+  rows+=lineItem('Gaji / Upah Karyawan',-d.bebanGaji,'neg',1);
+  rows+=totalLine('Subtotal Beban Gaji',-d.bebanGaji,'neg','single');
+
+  rows+=subhead('C.2 Beban Operasional Lainnya');
+  rows+=lineItem('Listrik & Air',-d.bebanOp.detail.listrik,'neg',1);
+  rows+=lineItem('Perawatan & Pemeliharaan',-d.bebanOp.detail.perawatan,'neg',1);
+  rows+=lineItem('Administrasi & Umum',-d.bebanOp.detail.administrasi,'neg',1);
+  rows+=lineItem('Beban Lain-lain',-d.bebanOp.detail.lainnya,'neg',1);
+  const subtotalOpLain=d.bebanOp.detail.listrik+d.bebanOp.detail.perawatan+d.bebanOp.detail.administrasi+d.bebanOp.detail.lainnya;
+  rows+=totalLine('Subtotal Beban Op. Lainnya',-subtotalOpLain,'neg','single');
+
+  rows+=totalLine('Total Beban Operasional',-d.totalBeban,'neg','double');
+  rows+=totalLine('LABA OPERASIONAL',d.labaOperasional,d.labaOperasional>=0?'pos':'neg','double');
+  rows+=marginLine('Margin Laba Operasional',opMarginPct,d.labaOperasional>=0?'pos':'neg');
+  rows+=sep;
+
+  // D. PENYESUAIAN STOK
+  rows+=subhead('D. PENYESUAIAN STOK (LOSSES & PLUS)');
+  rows+=subhead('D.1 Kerugian Losses (Susut Stok)');
+  let adaLosses=false;
+  BBM.forEach(b=>{
+    if(d.losses.detail[b]>0){
+      adaLosses=true;
+      rows+=lineItem('Losses '+BL[b],-d.losses.detail[b],'neg',1);
+    }
+  });
+  if(!adaLosses)rows+='<tr class="lk-item"><td colspan="2" style="padding-left:36px;color:var(--text3);font-style:italic">Tidak ada losses</td></tr>';
+  rows+=totalLine('Total Losses ('+fN(d.losses.ltr)+' ltr)',-d.losses.rp,'neg','single');
+
+  rows+=subhead('D.2 Keuntungan Plus (Surplus Stok)');
+  let adaPlus=false;
+  BBM.forEach(b=>{
+    if(d.plus.detail[b]>0){
+      adaPlus=true;
+      rows+=lineItem('Plus '+BL[b],d.plus.detail[b],'neu',1);
+    }
+  });
+  if(!adaPlus)rows+='<tr class="lk-item"><td colspan="2" style="padding-left:36px;color:var(--text3);font-style:italic">Tidak ada plus</td></tr>';
+  rows+=totalLine('Total Plus ('+fN(d.plus.ltr)+' ltr)',d.plus.rp,'neu','single');
+
+  rows+=totalLine('LABA (RUGI) BERSIH',d.labaBersih,d.labaBersih>=0?'pos':'neg','double');
+  rows+=marginLine('Net Profit Margin',netMarginPct,d.labaBersih>=0?'pos':'neg');
+  rows+=sep;
+
+  // E. DISTRIBUSI LABA
+  rows+=subhead('E. DISTRIBUSI LABA');
+  if(d.labaBersih>0){
+    rows+=lineItem('Laba Bersih (Basis Distribusi)',d.labaBersih,'pos',0);
+    rows+=lineItem('Dividen (10%)',-d.dividen,'neg',1);
+    rows+=lineItem('Laba Ditahan (90%)',d.labaDitahan,'neu',1);
+    rows+=totalLine('Total Alokasi Laba',d.labaBersih,'pos','single');
+  }else{
+    rows+='<tr class="lk-item"><td colspan="2" style="padding-left:36px;color:var(--text3);font-style:italic">Tidak ada distribusi — usaha mengalami kerugian</td></tr>';
+  }
+
+  // KPI Cards
+  let kpiHTML='<div class="dash-kpi" style="margin-bottom:20px">';
+  kpiHTML+='<div class="kpi-card kpi-blue"><span class="kpi-icon">💵</span><div class="kpi-label">Pendapatan</div><div class="kpi-value">'+fR(d.pendapatan.total)+'</div><div class="kpi-sub">'+d.hariCount+' hari</div></div>';
+  kpiHTML+='<div class="kpi-card kpi-green"><span class="kpi-icon">📊</span><div class="kpi-label">Laba Kotor</div><div class="kpi-value kv-green">'+fR(d.labaKotor)+'</div><div class="kpi-sub">'+grossMarginPct.toFixed(1)+'%</div></div>';
+  const opCls=d.labaOperasional>=0?'kpi-green':'kpi-red';
+  const opVcls=d.labaOperasional>=0?'kv-green':'kv-red';
+  kpiHTML+='<div class="kpi-card '+opCls+'"><span class="kpi-icon">🏭</span><div class="kpi-label">Laba Operasional</div><div class="kpi-value '+opVcls+'">'+fR(d.labaOperasional)+'</div><div class="kpi-sub">'+opMarginPct.toFixed(1)+'%</div></div>';
+  const lbCls=d.labaBersih>=0?'kpi-green':'kpi-red';
+  const lbVcls=d.labaBersih>=0?'kv-green':'kv-red';
+  kpiHTML+='<div class="kpi-card '+lbCls+'"><span class="kpi-icon">💰</span><div class="kpi-label">Laba Bersih</div><div class="kpi-value '+lbVcls+'">'+fR(d.labaBersih)+'</div><div class="kpi-sub">'+netMarginPct.toFixed(1)+'%</div></div>';
+  kpiHTML+='<div class="kpi-card kpi-amber"><span class="kpi-icon">💎</span><div class="kpi-label">Dividen 10%</div><div class="kpi-value">'+fR(d.dividen)+'</div><div class="kpi-sub">'+(d.labaBersih<0?'rugi':'dari laba bersih')+'</div></div>';
+  const ldCls=d.labaDitahan>=0?'kv-green':'kv-red';
+  kpiHTML+='<div class="kpi-card kpi-purple"><span class="kpi-icon">🏦</span><div class="kpi-label">Laba Ditahan</div><div class="kpi-value '+ldCls+'">'+fR(d.labaDitahan)+'</div><div class="kpi-sub">90%</div></div>';
+  kpiHTML+='</div>';
+
+  // Filter bar
+  let filterHTML='<div class="card" style="padding:14px 20px;margin-bottom:16px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+  filterHTML+='<span style="font-size:12px;font-weight:700;color:var(--text2)">PERIODE:</span><div class="snav" style="margin:0">';
+  ['bulanan','tahunan','custom'].forEach(m=>{
+    const lbl=m==='bulanan'?'Bulanan':m==='tahunan'?'Tahunan':'Kustom';
+    const act=lapKeuMode===m?' active':'';
+    filterHTML+='<button class="snav-btn'+act+'" onclick="lapKeuMode=\''+m+'\';renderLapKeuPage(e(\'main-content\'))">'+lbl+'</button>';
+  });
+  filterHTML+='</div>';
+  if(lapKeuMode==='bulanan'){
+    filterHTML+='<select class="inp" id="lk-bulan" onchange="renderLapKeuPage(e(\'main-content\'))" style="width:140px;padding:5px 8px;font-size:12px">';
+    bulanList.forEach(b=>{filterHTML+='<option value="'+b+'"'+(b===selBulan?' selected':'')+'>'+bulanLabel(b)+'</option>';});
+    filterHTML+='</select>';
+  }
+  if(lapKeuMode==='tahunan'){
+    filterHTML+='<select class="inp" id="lk-tahun" onchange="renderLapKeuPage(e(\'main-content\'))" style="width:120px;padding:5px 8px;font-size:12px">';
+    tahunList.forEach(t=>{filterHTML+='<option value="'+t+'"'+(t===selTahun?' selected':'')+'>Tahun '+t+'</option>';});
+    filterHTML+='</select>';
+  }
+  if(lapKeuMode==='custom'){
+    filterHTML+='<input type="date" class="inp" id="lk-from" value="'+selFrom+'" onchange="renderLapKeuPage(e(\'main-content\'))" style="width:130px;padding:5px 8px;font-size:12px">';
+    filterHTML+='<span style="font-size:12px;color:var(--text2)">s/d</span>';
+    filterHTML+='<input type="date" class="inp" id="lk-to" value="'+selTo+'" onchange="renderLapKeuPage(e(\'main-content\'))" style="width:130px;padding:5px 8px;font-size:12px">';
+  }
+  filterHTML+='<button class="btn btn-ghost btn-sm" onclick="printLapKeu()" style="margin-left:auto">🖨 Print</button>';
+  filterHTML+='<button class="btn btn-primary btn-sm" onclick="exportLapKeuCSV()">📥 Export CSV</button>';
+  filterHTML+='</div></div>';
+
+  // Header laporan formal
+  const tglCetak=new Date().toLocaleDateString('id-ID',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+  const profil=getProfil();
+  let kopHTML='<div style="text-align:center;padding:24px 16px;border-bottom:3px solid var(--text);background:var(--surface2);border-radius:var(--radius-lg) var(--radius-lg) 0 0">';
+  kopHTML+='<div style="font-size:11px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:var(--text3);margin-bottom:6px">Laporan Keuangan</div>';
+  kopHTML+='<div style="font-size:22px;font-weight:800;letter-spacing:.02em;color:var(--text)">LABA RUGI USAHA</div>';
+  kopHTML+='<div style="font-size:14px;font-weight:700;color:var(--text);margin-top:6px">'+esc(profil.nama||'SPBU')+'</div>';
+  if(profil.noSpbu)kopHTML+='<div style="font-size:12px;color:var(--text2);margin-top:2px">No. SPBU Pertamina: <strong>'+esc(profil.noSpbu)+'</strong></div>';
+  if(profil.alamat)kopHTML+='<div style="font-size:11px;color:var(--text3);margin-top:2px">'+esc(profil.alamat)+'</div>';
+  kopHTML+='<div style="height:1px;background:var(--border);margin:12px auto;max-width:300px"></div>';
+  kopHTML+='<div style="font-size:13px;color:var(--text)"><strong>Periode:</strong> '+periodeLabel+'</div>';
+  kopHTML+='<div style="font-size:11px;color:var(--text3);margin-top:4px">'+d.hariCount+' hari operasi · Dicetak: '+tglCetak+'</div>';
+  kopHTML+='</div>';
+
+  // Final HTML
+  let finalHTML='';
+  finalHTML+='<div class="page-header"><div class="page-title">📑 Laporan Keuangan</div><div class="page-sub">Laporan Laba Rugi Usaha SPBU</div></div>';
+  finalHTML+=filterHTML;
+  finalHTML+=kpiHTML;
+  finalHTML+='<div class="card" id="lapkeu-print-area" style="padding:0;overflow:hidden">';
+  finalHTML+=kopHTML;
+  finalHTML+='<table class="lk-tbl">'+rows+'</table>';
+  finalHTML+='<div style="margin:0;padding:14px 18px;background:var(--blue-bg);border-top:1px solid var(--border);font-size:12px;color:var(--text2);line-height:1.6">';
+  finalHTML+='<strong style="color:var(--blue)">📌 Catatan:</strong> ';
+  finalHTML+='Losses = susut stok BBM (kerugian). Plus = surplus stok (keuntungan tambahan). ';
+  finalHTML+='Dividen 10% dari laba bersih, sisa 90% adalah laba ditahan untuk reinvestasi.';
+  finalHTML+='</div>';
+  finalHTML+='</div>';
+
+  // Charts section
+  finalHTML+='<div class="g2">';
+  finalHTML+='<div class="card"><div class="card-title">📊 Komposisi Pendapatan per BBM</div><div style="position:relative;height:220px"><canvas id="lk-chart-pendapatan"></canvas></div></div>';
+  finalHTML+='<div class="card"><div class="card-title">📊 Waterfall Laba Rugi</div><div style="position:relative;height:220px"><canvas id="lk-chart-waterfall"></canvas></div></div>';
+  finalHTML+='</div>';
+
+  // Rasio
+  finalHTML+='<div class="card"><div class="card-title">📐 Analisis Rasio Keuangan</div><div class="g4">';
+  const ratios=[
+    {l:'Gross Profit Margin',v:grossMarginPct.toFixed(2)+'%',s:'Laba Kotor / Pendapatan',c:d.labaKotor>=0?'c-green':'c-red'},
+    {l:'Operating Margin',v:opMarginPct.toFixed(2)+'%',s:'Laba Op. / Pendapatan',c:d.labaOperasional>=0?'c-green':'c-red'},
+    {l:'Net Profit Margin',v:netMarginPct.toFixed(2)+'%',s:'Laba Bersih / Pendapatan',c:d.labaBersih>=0?'c-green':'c-red'},
+    {l:'Beban / Pendapatan',v:d.pendapatan.total>0?((d.totalBeban/d.pendapatan.total)*100).toFixed(2)+'%':'—',s:'Total Beban / Pendapatan',c:''},
+    {l:'HPP Ratio',v:d.pendapatan.total>0?((d.hpp.total/d.pendapatan.total)*100).toFixed(2)+'%':'—',s:'HPP / Pendapatan',c:''},
+    {l:'Losses Ratio',v:d.pendapatan.total>0?((d.losses.rp/d.pendapatan.total)*100).toFixed(2)+'%':'—',s:'Losses / Pendapatan',c:d.losses.rp>0?'c-red':''},
+    {l:'Laba per Hari',v:d.hariCount>0?fR(Math.round(d.labaBersih/d.hariCount)):'—',s:'Rata-rata',c:d.labaBersih>=0?'c-green':'c-red'},
+    {l:'Dividen per Hari',v:d.hariCount>0&&d.dividen>0?fR(Math.round(d.dividen/d.hariCount)):'—',s:'Rata-rata',c:''},
+  ];
+  ratios.forEach(r=>{
+    finalHTML+='<div class="metric"><div class="metric-label">'+r.l+'</div><div class="metric-value '+r.c+'">'+r.v+'</div><div class="metric-sub">'+r.s+'</div></div>';
+  });
+  finalHTML+='</div></div>';
+
+  main.innerHTML=finalHTML;
+
+  // Render charts
+  setTimeout(()=>{
+    const ctx1=e('lk-chart-pendapatan');
+    if(ctx1&&window.Chart){
+      new Chart(ctx1,{type:'doughnut',data:{
+        labels:BBM.map(b=>BL[b]),
+        datasets:[{data:BBM.map(b=>d.pendapatan.detail[b]),backgroundColor:['#2D6A2D','#185FA5','#854F0B','#534AB7'],borderWidth:2}]
+      },options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right',labels:{font:{size:11}}}}}});
+    }
+    const ctx2=e('lk-chart-waterfall');
+    if(ctx2&&window.Chart){
+      const labels=['Pendapatan','HPP','Laba Kotor','Beban','Laba Op.','Losses','Plus','Laba Bersih'];
+      const values=[d.pendapatan.total,-d.hpp.total,d.labaKotor,-d.totalBeban,d.labaOperasional,-d.losses.rp,d.plus.rp,d.labaBersih];
+      const colors=values.map(v=>v>=0?'rgba(45,106,45,.75)':'rgba(163,45,45,.75)');
+      new Chart(ctx2,{type:'bar',data:{labels:labels,datasets:[{label:'Nilai',data:values,backgroundColor:colors,borderRadius:4,borderSkipped:false}]},
+        options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+        scales:{y:{ticks:{callback:v=>fR(v),font:{size:9}}},x:{ticks:{font:{size:9}}}}}});
+    }
+  },100);
+}
+
+function printLapKeu(){
+  const area=e('lapkeu-print-area');
+  if(!area){toast('Tidak ada laporan untuk dicetak.');return;}
+  const w=window.open('','_blank');
+  const css='*{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial,sans-serif;font-size:11px;padding:20px;color:#1A1916;background:#fff}.lk-tbl{width:100%;border-collapse:collapse;font-size:11px}.lk-tbl td{padding:6px 14px;vertical-align:middle}.lk-num{text-align:right;font-family:monospace}.lk-section td{background:#1A1916;color:#fff;font-size:9px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;padding:7px 14px}.lk-item td{border-bottom:1px solid #E4E0D8}.lk-total td{font-weight:700;border-top:1.5px solid #1A1916;border-bottom:1px solid #E4E0D8;background:#F1EFE9}.lk-total.lk-double td{border-top:2.5px double #1A1916;border-bottom:2.5px double #1A1916;background:#FAF5E8}.lk-margin td{font-size:10px;font-style:italic;border-bottom:1px solid #E4E0D8}.lk-sep td{height:6px}@media print{body{padding:10px}}';
+  w.document.write('<!DOCTYPE html><html><head><title>Laporan Keuangan SPBU</title><style>'+css+'</style></head><body>'+area.innerHTML+'</body></html>');
+  w.document.close();
+  setTimeout(()=>w.print(),500);
+}
+
+
+function exportLapKeuCSV(){
+  const selBulan=e('lk-bulan')?e('lk-bulan').value:'';
+  const selTahun=e('lk-tahun')?e('lk-tahun').value:'';
+  const selFrom=e('lk-from')?e('lk-from').value:'';
+  const selTo=e('lk-to')?e('lk-to').value:'';
+  let filterVal=null;
+  if(lapKeuMode==='bulanan')filterVal=selBulan;
+  else if(lapKeuMode==='tahunan')filterVal=selTahun;
+  else if(lapKeuMode==='custom')filterVal={from:selFrom,to:selTo};
+  const d=getLapKeuData(lapKeuMode,filterVal);
+  if(!d){toast('Tidak ada data.');return;}
+  const rows=[
+    ['LAPORAN KEUANGAN SPBU',''],
+    ['Periode',lapKeuMode==='bulanan'?selBulan:lapKeuMode==='tahunan'?selTahun:selFrom+' s/d '+selTo],
+    ['Jumlah Hari Operasi',d.hariCount],['',''],
+    ['A. PENDAPATAN USAHA',''],
+    ...BBM.map(b=>['Penjualan '+BL[b],d.pendapatan.detail[b]]),
+    ['Total Pendapatan',d.pendapatan.total],['',''],
+    ['B. BEBAN POKOK PENJUALAN',''],
+    ...BBM.map(b=>['HPP '+BL[b],-d.hpp.detail[b]]),
+    ['Total HPP',-d.hpp.total],
+    ['LABA KOTOR',d.labaKotor],['',''],
+    ['C. BEBAN OPERASIONAL',''],
+    ['Gaji/Upah',-d.bebanGaji],
+    ['Listrik & Air',-d.bebanOp.detail.listrik],
+    ['Perawatan',-d.bebanOp.detail.perawatan],
+    ['Administrasi',-d.bebanOp.detail.administrasi],
+    ['Lain-lain',-d.bebanOp.detail.lainnya],
+    ['Total Beban',-d.totalBeban],
+    ['LABA OPERASIONAL',d.labaOperasional],['',''],
+    ['D. PENYESUAIAN STOK',''],
+    ['Kerugian Losses',-d.losses.rp],
+    ['Keuntungan Plus',d.plus.rp],
+    ['LABA BERSIH',d.labaBersih],['',''],
+    ['E. DISTRIBUSI LABA',''],
+    ['Dividen (10%)',-d.dividen],
+    ['Laba Ditahan (90%)',d.labaDitahan],['',''],
+    ['RASIO KEUANGAN',''],
+    ['Gross Margin %',d.pendapatan.total>0?(d.labaKotor/d.pendapatan.total*100).toFixed(2)+'%':''],
+    ['Operating Margin %',d.pendapatan.total>0?(d.labaOperasional/d.pendapatan.total*100).toFixed(2)+'%':''],
+    ['Net Margin %',d.pendapatan.total>0?(d.labaBersih/d.pendapatan.total*100).toFixed(2)+'%':''],
+  ];
+  const csv=rows.map(r=>r.map(v=>typeof v==='string'&&v.includes(',')?`"${v}"`:v).join(',')).join('\n');
+  const blob=new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;
+  a.download=`lapkeu_spbu_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();URL.revokeObjectURL(url);
+  toast('✓ Laporan keuangan berhasil diunduh!');
+}
+
+function renderHargaPage(main){
+  const rows=BBM.map(b=>{const hj=state.harga[b],hpp=state.harga['hpp_'+b],m=hj-hpp;const pct=hj>0?(m/hj*100):0;return`<tr><td><span class="tag ${BT[b]}">${BL[b]}</span></td><td><input type="text" class="harga-inp" id="hj-${b}" value="${fN(hj)}" oninput="updateHarga('${b}')" style="width:130px"></td><td><input type="text" class="harga-inp" id="mg-${b}" value="${fN(m)}" oninput="updateHarga('${b}')" style="width:130px"></td><td id="hpp-display-${b}" style="font-weight:700;color:var(--blue)">Rp ${fN(hpp)}</td><td id="hmp-${b}" style="color:${m>=0?'var(--green)':'var(--red)'}">${(pct>=0?'':'-')+Math.abs(pct).toFixed(2)}%</td></tr>`;}).join('');
+
+  // Riwayat harga
+  const riwayat=state.riwayatHarga||[];
+  const riwayatRows=riwayat.length?riwayat.map((r,i)=>{
+    const tgl=r.tanggal;const ket=r.keterangan||'—';
+    const cols=BBM.map(b=>`<td style="text-align:right">Rp ${fN(r.harga[b]||0)}<br><small style="color:var(--text3)">HPP ${fN(r.harga['hpp_'+b]||0)}</small></td>`).join('');
+    return`<tr><td>${tgl}</td>${cols}<td>${ket}</td><td><button class="btn btn-del btn-sm" onclick="hapusRiwayatHarga(${i})" title="Hapus riwayat ini">🗑</button></td></tr>`;
+  }).join(''):`<tr><td colspan="7" class="empty-state" style="padding:16px">Belum ada riwayat perubahan harga.</td></tr>`;
+
+  // Harga yang berlaku hari ini
+  const today=new Date().toISOString().slice(0,10);
+  const hariIni=getHargaPadaTanggal(today,'pertalite');
+
+  main.innerHTML=`<div class="page-header"><div class="page-title">Harga BBM</div><div class="page-sub">Kelola harga jual, HPP, dan riwayat perubahan harga</div></div>
+
+  <div class="card">
+    <div class="card-title">🏷 Harga Aktif Saat Ini
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="font-size:11px;color:var(--text3)">${riwayat.length?'Berlaku sejak: '+riwayat[0].tanggal:'Belum ada riwayat'}</span>
+      </div>
+    </div>
+    <div class="nt nt-i" style="margin-bottom:12px;font-size:12px">ℹ Input <strong>Harga Jual</strong> dan <strong>Margin/ltr</strong> — HPP dihitung otomatis: <code style="background:var(--surface2);padding:1px 6px;border-radius:4px">HPP = Harga Jual − Margin</code></div>
+    <div class="tbl-wrap"><table><thead><tr><th style="text-align:left">BBM</th><th>Harga Jual (Rp/ltr)</th><th>Margin/ltr (input)</th><th>HPP (otomatis)</th><th>Margin %</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="g4" style="margin-top:16px">
+      ${BBM.map(b=>{const hj=state.harga[b],hpp=state.harga['hpp_'+b],m=hj-hpp;return`<div class="metric" id="hcard-${b}"><div class="metric-label">Margin ${BL[b]}</div><div class="metric-value ${m>=0?'c-green':'c-red'}" id="hmc-${b}">${m>=0?'':'-'}Rp ${fN(Math.abs(m))}/ltr</div></div>`;}).join('')}
+    </div>
+  </div>
+
+  <div class="card" style="border:2px solid var(--amber-light)">
+    <div class="card-title" style="color:var(--amber)">⚡ Catat Perubahan Harga BBM</div>
+    <div class="nt nt-w" style="margin-bottom:16px">
+      ⚠ Setiap kali harga BBM berubah, catat di sini sebelum input data hari baru. Data yang sudah tersimpan sebelum tanggal ini tetap menggunakan harga lama secara otomatis.
+    </div>
+    <div class="form-row cols-2" style="margin-bottom:12px">
+      <div class="fg">
+        <label>Tanggal Berlaku Harga Baru</label>
+        <input type="date" class="inp" id="rh-tanggal" value="${today}">
+      </div>
+      <div class="fg">
+        <label>Keterangan (opsional)</label>
+        <input type="text" class="inp" id="rh-ket" placeholder="cth: Penyesuaian Januari 2025">
+      </div>
+    </div>
+    <div style="background:var(--surface2);border-radius:var(--radius);padding:14px;margin-bottom:14px;font-size:12px;color:var(--text2)">
+      📝 Pastikan harga di tabel atas sudah diperbarui ke harga baru, lalu klik tombol di bawah untuk menyimpan perubahan harga beserta tanggal berlakunya.
+    </div>
+    <button class="btn btn-save" onclick="konfirmasiSimpanRiwayatHarga()">💾 Simpan Perubahan Harga & Tanggal Berlaku</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">📋 Riwayat Perubahan Harga <span style="font-size:11px;color:var(--text3);font-weight:400">(${riwayat.length} perubahan tercatat)</span></div>
+    <div class="nt nt-i" style="margin-bottom:12px">
+      ℹ Data penjualan yang tersimpan secara otomatis menggunakan harga yang berlaku pada tanggal tersebut.
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th style="text-align:left">Tanggal Berlaku</th><th>Pertalite</th><th>Pertamax</th><th>Dexlite</th><th>Biosolar</th><th style="text-align:left">Keterangan</th><th></th></tr></thead>
+      <tbody>${riwayatRows}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function hapusRiwayatHarga(i){
+  if(!confirm('Hapus riwayat harga ini? Data penjualan yang mengacu pada riwayat ini akan menggunakan harga aktif.'))return;
+  state.riwayatHarga.splice(i,1);
+  dbSave();
+  renderHargaPage(e('main-content'));
+  toast('Riwayat harga dihapus.');
+}
+
+function konfirmasiSimpanRiwayatHarga(){
+  const tgl=e('rh-tanggal')?.value;
+  const ket=e('rh-ket')?.value||'';
+  if(!tgl){toast('Tanggal berlaku harus diisi!');return;}
+  // Tampilkan preview harga yang akan disimpan
+  const preview=BBM.map(b=>`${BL[b]}: Rp ${fN(state.harga[b])} (HPP: Rp ${fN(state.harga['hpp_'+b])})`).join('\n');
+  if(confirm(`Simpan perubahan harga berlaku mulai ${tgl}?\n\n${preview}\n\nData penjualan sebelum tanggal ini tetap menggunakan harga lama.`)){
+    simpanRiwayatHarga(tgl,ket);
+    toast('✓ Perubahan harga disimpan! Berlaku mulai '+tgl);
+    renderHargaPage(e('main-content'));
+  }
+}
+
+function updateHarga(b){
+  const hjRaw=parseInt((e('hj-'+b)?.value||'').replace(/\./g,''))||0;
+  const mgRaw=parseInt((e('mg-'+b)?.value||'').replace(/\./g,''))||0;
+  const hppCalc=hjRaw-mgRaw;
+
+  // ── Validasi ────────────────────────────────────────────────
+  if(hjRaw<=0){toast('⚠ Harga jual tidak boleh 0!');return;}
+  if(mgRaw<0){toast('⚠ Margin tidak boleh negatif!');return;}
+  if(hppCalc>=hjRaw){toast('⚠ HPP tidak boleh ≥ Harga Jual! Periksa kembali margin.');return;}
+  if(mgRaw>0&&mgRaw<50){
+    if(!confirm('Margin '+BL[b]+' hanya Rp '+mgRaw+'/ltr — sangat kecil, apakah sudah benar?'))return;
+  }
+
+  state.harga[b]=hjRaw;state.harga['hpp_'+b]=hppCalc;
+  saveHargaLocal();
+  if(_fbInited) setTimeout(()=>fbSaveAppState().catch(()=>{}),500);
+  const m=mgRaw;const pct=hjRaw>0?(m/hjRaw*100):0;
+  // Update tampilan HPP otomatis
+  const hppEl=e('hpp-display-'+b);if(hppEl){hppEl.textContent='Rp '+fN(hppCalc);hppEl.style.color=hppCalc>=0?'var(--blue)':'var(--red)';}
+  const mpEl=e('hmp-'+b);if(mpEl){mpEl.textContent=(pct>=0?'':'-')+Math.abs(pct).toFixed(2)+'%';mpEl.style.color=m>=0?'var(--green)':'var(--red)';}
+  const mcEl=e('hmc-'+b);if(mcEl){mcEl.textContent=(m>=0?'':'-')+'Rp '+fN(Math.abs(m))+'/ltr';mcEl.className='metric-value '+(m>=0?'c-green':'c-red');}
+  dbSave();
+}
+
+// ════════════════════════════════════════════════════════════
+// PAGE: DATABASE
+// ════════════════════════════════════════════════════════════
+
+
+// ═══════════════════════════════════════════════════════════════
+//  PRINT LAPORAN HARIAN — SIAP CETAK / KIRIM WhatsApp
+// ═══════════════════════════════════════════════════════════════
+function printLaporanHarian(){
+  const tgl=e('f-tanggal')?.value||new Date().toISOString().slice(0,10);
+  const rec=state.savedData.find(d=>d.tanggal===tgl);
+  const profil=getProfil();
+  const hSnap=rec?.hargaSnapshot||null;
+
+  let totalJual=0,totalOmzet=0,totalLaba=0,totalLosses=0;
+  const bbmData=BBM.map(b=>{
+    let jual=0,losses=0,awal=0,akhir=0;
+    const shifts=rec?.shifts||[];
+    if(shifts.length)awal=rec.shiftData[shifts[0]]?.[b]?.awal||0;
+    shifts.forEach(sh=>{const sd=rec?.shiftData[sh]?.[b]||{};jual+=sd.jual||0;losses+=sd.losses||0;});
+    if(shifts.length)akhir=rec?.shiftData[shifts[shifts.length-1]]?.[b]?.stokAkhirEfektif||0;
+    const hj=hSnap?hSnap[b]:gHJ(b);
+    const hpp=hSnap?hSnap['hpp_'+b]:gHPP(b);
+    const omzet=jual*hj;const laba=jual*(hj-hpp);
+    totalJual+=jual;totalOmzet+=omzet;totalLaba+=laba;totalLosses+=losses;
+    return{b,jual,losses,awal,akhir,omzet,laba,hj,hpp,margin:hj-hpp};
+  });
+
+  const biayaTotal=rec?.ops||0;
+  const labaBersih=totalLaba-biayaTotal;
+  const bln=['Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+  const [y,m,d]=tgl.split('-');
+  const tglStr=d+' '+bln[parseInt(m)-1]+' '+y;
+  const hariStr=rec?.hari||['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'][new Date(tgl+'T00:00:00').getDay()];
+  const namaSpbu=profil.namaSPBU||profil.nama||'SPBU';
+
+  const css=[
+    '*{box-sizing:border-box;margin:0;padding:0}',
+    'body{font-family:"Times New Roman",serif;font-size:12px;color:#000;background:#fff;padding:20px 24px}',
+    '.hdr{text-align:center;border-bottom:2px solid #000;padding-bottom:10px;margin-bottom:14px}',
+    '.hdr h1{font-size:16px;font-weight:bold;text-transform:uppercase;letter-spacing:.5px}',
+    '.hdr h2{font-size:13px;font-weight:normal;margin-top:4px}',
+    '.hdr p{font-size:11px;color:#444;margin-top:2px}',
+    'table{width:100%;border-collapse:collapse;margin-bottom:12px}',
+    'th{background:#f0f0f0;font-weight:bold;padding:5px 8px;border:1px solid #999;font-size:11px;text-align:left}',
+    'td{padding:5px 8px;border:1px solid #ccc;font-size:12px}',
+    '.r{text-align:right}.c{text-align:center}',
+    '.tot td{font-weight:bold;background:#e8e8e8;border-top:2px solid #999}',
+    '.sec{font-size:12px;font-weight:bold;text-transform:uppercase;background:#333;color:#fff;padding:6px 10px;margin:14px 0 6px}',
+    '.sgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}',
+    '.sbox{border:1px solid #999;padding:10px;text-align:center}',
+    '.sbox .lbl{font-size:10px;text-transform:uppercase;color:#666;font-weight:bold}',
+    '.sbox .val{font-size:16px;font-weight:bold;margin-top:4px}',
+    '.sbox .sub{font-size:10px;color:#666;margin-top:2px}',
+    '.lr td{background:#fff0f0}',
+    '.ftl{margin-top:20px;display:flex;justify-content:space-between}',
+    '.ttd{text-align:center;width:150px}',
+    '.ttd .line{border-top:1px solid #000;margin-top:40px;padding-top:4px;font-size:11px}',
+    '.alrt{background:#fff3cd;border:1px solid #ffc107;padding:6px 10px;font-size:11px;margin-bottom:10px}',
+    '@media print{@page{margin:1.5cm;size:A4}body{padding:0}}'
+  ].join('');
+
+  // Build HTML rows
+  const bbmRows=bbmData.map(d=>{
+    const lossClass=d.losses>0?' class="lr"':'';
+    return '<tr'+lossClass+'>'
+      +'<td><strong>'+BL[d.b]+'</strong></td>'
+      +'<td class="r">'+fN(d.awal)+'</td>'
+      +'<td class="r"><strong>'+fN(d.jual)+'</strong></td>'
+      +'<td class="r">'+fR(d.hj)+'</td>'
+      +'<td class="r">'+fRF(d.omzet)+'</td>'
+      +'<td class="r">'+fR(d.margin)+'</td>'
+      +'<td class="r" style="color:#2D6A2D"><strong>'+fRF(d.laba)+'</strong></td>'
+      +'<td class="r" style="color:'+(d.losses>0?'#c00':'#888')+'">'+(d.losses>0?fN(d.losses)+' ltr':'—')+'</td>'
+      +'<td class="r">'+fN(d.akhir)+'</td>'
+      +'</tr>';
+  }).join('');
+
+  const shiftRows=(rec?.shifts||[]).map(sh=>{
+    const shL={pagi:'Pagi 06-14',siang:'Siang 14-22',malam:'Malam 22-06'};
+    let rowTotal=0;
+    const cells=BBM.map(b=>{const v=rec.shiftData[sh]?.[b]?.jual||0;rowTotal+=v;return '<td class="r">'+fN(v)+'</td>';}).join('');
+    return '<tr><td><strong>'+(shL[sh]||sh)+'</strong></td>'+cells+'<td class="r"><strong>'+fN(rowTotal)+'</strong></td></tr>';
+  }).join('');
+
+  const biayaRows=(rec?.biayaItems||[]).map(i=>'<tr><td>'+esc(i.ket)+'</td><td>'+(CATS[i.cat]?.label||i.cat)+'</td><td class="r">Rp '+fN(i.nom)+'</td></tr>').join('');
+
+  const html='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Laporan Harian '+tglStr+'</title>'
+    +'<style>'+css+'</style></head><body>'
+    +'<div class="hdr"><h1>'+namaSpbu+'</h1><h2>LAPORAN PENJUALAN HARIAN</h2>'
+    +'<p>'+(profil.alamat||'')+' '+(profil.telp?'| Tel: '+profil.telp:'')+'</p>'
+    +'<p style="font-weight:bold;margin-top:4px">'+hariStr+', '+tglStr+'</p></div>'
+    +(rec?''
+      +'<div class="sgrid">'
+      +'<div class="sbox"><div class="lbl">Total Terjual</div><div class="val">'+fN(totalJual)+'</div><div class="sub">Liter</div></div>'
+      +'<div class="sbox"><div class="lbl">Total Omzet</div><div class="val">'+fRF(totalOmzet)+'</div><div class="sub">Pendapatan Kotor</div></div>'
+      +'<div class="sbox"><div class="lbl">Laba Bersih</div><div class="val" style="color:'+(labaBersih>=0?'#2D6A2D':'#c00')+'">'+fRF(labaBersih)+'</div><div class="sub">Setelah biaya</div></div>'
+      +'</div>'
+      +'<div class="sec">Rincian per Produk</div>'
+      +'<table><thead><tr>'
+      +'<th>Produk</th><th class="r">Stok Awal</th><th class="r">Terjual</th><th class="r">Harga/ltr</th><th class="r">Omzet</th><th class="r">Margin</th><th class="r">Laba</th><th class="r">Losses</th><th class="r">Stok Akhir</th>'
+      +'</tr></thead><tbody>'+bbmRows+'</tbody>'
+      +'<tfoot><tr class="tot"><td><strong>TOTAL</strong></td><td></td>'
+      +'<td class="r"><strong>'+fN(totalJual)+' ltr</strong></td><td></td>'
+      +'<td class="r"><strong>'+fRF(totalOmzet)+'</strong></td><td></td>'
+      +'<td class="r" style="color:#2D6A2D"><strong>'+fRF(totalLaba)+'</strong></td>'
+      +'<td class="r" style="color:#c00"><strong>'+(totalLosses>0?fN(totalLosses)+' ltr':'—')+'</strong></td>'
+      +'<td></td></tr></tfoot></table>'
+      +(shiftRows?'<div class="sec">Rincian per Shift</div>'
+        +'<table><thead><tr><th>Shift</th>'+BBM.map(b=>'<th class="r">'+BL[b]+' (ltr)</th>').join('')+'<th class="r">Total</th></tr></thead>'
+        +'<tbody>'+shiftRows+'</tbody></table>':'')
+      +(biayaRows?'<div class="sec">Biaya Operasional</div>'
+        +'<table><thead><tr><th>Keterangan</th><th>Kategori</th><th class="r">Nominal</th></tr></thead>'
+        +'<tbody>'+biayaRows+'</tbody>'
+        +'<tfoot><tr class="tot"><td colspan="2"><strong>Total Biaya</strong></td><td class="r"><strong>Rp '+fN(biayaTotal)+'</strong></td></tr></tfoot></table>':'')
+      +'<table><tbody>'
+      +'<tr><td>Laba Kotor</td><td class="r">'+fRF(totalLaba)+'</td></tr>'
+      +'<tr style="color:#c00"><td>Biaya Operasional</td><td class="r">-'+fRF(biayaTotal)+'</td></tr>'
+      +'<tr class="tot"><td><strong>LABA BERSIH HARI INI</strong></td><td class="r" style="color:'+(labaBersih>=0?'#2D6A2D':'#c00')+'"><strong>'+fRF(labaBersih)+'</strong></td></tr>'
+      +'</tbody></table>'
+      +(totalLosses>50?'<div class="alrt">&#9888; Losses hari ini '+fN(totalLosses)+' liter melebihi toleransi normal. Harap diperiksa.</div>':'')
+      :'<p style="text-align:center;color:red;padding:20px">&#9888; Belum ada data untuk tanggal ini</p>')
+    +'<div class="ftl">'
+    +'<div class="ttd"><div class="line">Diperiksa,</div><div style="font-size:11px;margin-top:2px">Manager</div></div>'
+    +'<div style="text-align:center;font-size:10px;color:#888;align-self:flex-end">Dicetak: '+new Date().toLocaleString('id-ID')+'<br>SPBU Manager</div>'
+    +'<div class="ttd"><div class="line">Mengetahui,</div><div style="font-size:11px;margin-top:2px">Owner</div></div>'
+    +'</div></body></html>';
+
+  const w=window.open('','_blank','width=800,height=900');
+  w.document.write(html);
+  w.document.close();
+  setTimeout(()=>w.print(),600);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SISTEM BACKUP OTOMATIS — MULTI-LAYER
+//  Layer 1: localStorage (primary, instant)
+//  Layer 2: Auto-export JSON harian (download file)
+//  Layer 3: Google Sheets via Apps Script (cloud)
+// ═══════════════════════════════════════════════════════════════
+
+const BACKUP_KEY     = 'spbu_backup_v1';      // backup harian di localStorage
+const BACKUP_LOG_KEY = 'spbu_backup_log';      // log waktu backup terakhir
+const BACKUP_COPY_KEY= 'spbu_backup_copy';     // salinan kedua (berbeda key)
+
+// ── Auto-backup ke localStorage (layer 1 + snapshot copy) ───
+function autoBackupLocal(){
+  try{
+    const snapshot=JSON.stringify({
+      savedData: state.savedData,
+      bebanUsaha: state.bebanUsaha||[],
+      harga: state.harga,
+      riwayatHarga: state.riwayatHarga||[],
+      backedUpAt: new Date().toISOString(),
+      version: 2
+    });
+    // Simpan di dua key berbeda (lindungi dari korupsi salah satu)
+    localStorage.setItem(BACKUP_KEY, snapshot);
+    // Rotasi: simpan snapshot kemarin sebagai backup copy
+    const prev=localStorage.getItem(BACKUP_KEY);
+    if(prev)localStorage.setItem(BACKUP_COPY_KEY, prev);
+    // Update log
+    const log=JSON.parse(localStorage.getItem(BACKUP_LOG_KEY)||'{}');
+    log.lastLocal=new Date().toISOString();
+    log.count=(log.count||0)+1;
+    log.dataRows=state.savedData.length;
+    localStorage.setItem(BACKUP_LOG_KEY, JSON.stringify(log));
+    updateBackupStatus();
+    return true;
+  }catch(e){
+    console.error('Backup local failed:', e);
+    return false;
+  }
+}
+
+// ── Pulihkan dari backup jika data utama korup/kosong ───────
+function checkAndRestoreBackup(){
+  // Jika data utama kosong tapi backup ada, tawarkan restore
+  if(state.savedData.length===0){
+    try{
+      const bk=JSON.parse(localStorage.getItem(BACKUP_KEY)||'{}');
+      if(bk.savedData&&bk.savedData.length>0){
+        if(confirm(`⚠ Data utama kosong!\nDitemukan backup ${bk.savedData.length} hari data (${new Date(bk.backedUpAt).toLocaleString('id-ID')}).\n\nPulihkan data dari backup?`)){
+          state.savedData=bk.savedData;
+          if(bk.bebanUsaha)state.bebanUsaha=bk.bebanUsaha;
+          if(bk.harga)state.harga={...state.harga,...bk.harga};
+          dbSave();
+          toast('✓ Data berhasil dipulihkan dari backup! ('+bk.savedData.length+' hari)');
+          return true;
+        }
+      }
+    }catch(e){}
+  }
+  return false;
+}
+
+// ── Export JSON ke file (download) ──────────────────────────
+function exportBackupJSON(){
+  const data={
+    savedData:state.savedData,
+    bebanUsaha:state.bebanUsaha||[],
+    harga:state.harga,  // harga terbaru
+    riwayatHarga:state.riwayatHarga||[],
+    profil:getProfil(),
+    exportedAt:new Date().toISOString(),
+    version:2,
+    info:'SPBU Manager Backup — jangan edit manual'
+  };
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  const tgl=new Date().toISOString().slice(0,10);
+  const profil=getProfil();
+  const nama=(profil.noSpbu||'SPBU').replace(/\./g,'-');
+  a.href=url;a.download=`backup-${nama}-${tgl}.json`;
+  document.body.appendChild(a);a.click();
+  document.body.removeChild(a);URL.revokeObjectURL(url);
+  // Update log
+  const log=JSON.parse(localStorage.getItem(BACKUP_LOG_KEY)||'{}');
+  log.lastExport=new Date().toISOString();
+  localStorage.setItem(BACKUP_LOG_KEY,JSON.stringify(log));
+  updateBackupStatus();
+  toast('✓ File backup berhasil diunduh!');
+}
+
+// ── Import dari file JSON ────────────────────────────────────
+function importBackupJSON(file){
+  if(!file)return;
+  const reader=new FileReader();
+  reader.onload=function(e){
+    try{
+      const data=JSON.parse(e.target.result);
+      if(!data.savedData||!Array.isArray(data.savedData)){
+        toast('⚠ File backup tidak valid!');return;
+      }
+      const n=data.savedData.length;
+      if(!confirm(`Import ${n} hari data dari file backup?\n(Data yang ada akan digabung, data duplikat tanggal akan ditimpa)`))return;
+      // Merge: existing + imported, deduplicate by tanggal
+      const merged={};
+      state.savedData.forEach(d=>merged[d.tanggal]=d);
+      data.savedData.forEach(d=>merged[d.tanggal]=d);
+      state.savedData=Object.values(merged).sort((a,b)=>a.tanggal>b.tanggal?-1:1);
+      if(data.bebanUsaha)state.bebanUsaha=[...(state.bebanUsaha||[]),...(data.bebanUsaha||[])];
+      if(data.harga)state.harga={...state.harga,...data.harga};
+      dbSave();autoBackupLocal();
+      toast('✓ Import berhasil! '+state.savedData.length+' hari data tersedia.');
+      showPage(currentPage||'dashboard');
+    }catch(err){toast('⚠ Gagal membaca file: '+err.message);}
+  };
+  reader.readAsText(file);
+}
+
+// ── Update status backup di UI ───────────────────────────────
+function updateBackupStatus(){
+  const log=JSON.parse(localStorage.getItem(BACKUP_LOG_KEY)||'{}');
+  const bk=JSON.parse(localStorage.getItem(BACKUP_KEY)||'{}');
+  const isCloud=!!getCloudUrl();
+  const lastLocal=log.lastLocal?new Date(log.lastLocal).toLocaleString('id-ID',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'Belum pernah';
+  const lastExport=log.lastExport?new Date(log.lastExport).toLocaleString('id-ID',{day:'numeric',month:'short'}):'—';
+  const copyOk=!!localStorage.getItem(BACKUP_COPY_KEY);
+  const rows=bk.savedData?.length||state.savedData.length||0;
+
+  // Update topbar status bar
+  const el=document.getElementById('backup-status-bar');
+  if(el){
+    el.innerHTML='<span style="font-size:11px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'
+      +'<span>💾 <strong>Lokal:</strong> '+lastLocal+'</span>'
+      +'<span style="color:'+(isCloud?'var(--green)':'var(--amber)')+'">☁ <strong>Cloud:</strong> '+(isCloud?'Aktif':'Belum diatur')+'</span>'
+      +'<span>📥 <strong>Export:</strong> '+lastExport+'</span>'
+      +'<span style="color:var(--text3)">'+rows+' hari</span>'
+      +'</span>';
+  }
+
+  // Update panel di halaman Database
+  const el2=document.getElementById('backup-status-db');
+  if(el2){
+    el2.innerHTML=''
+      +'<div><span style="color:'+(rows>0?'var(--green)':'var(--amber)')+'">'+( rows>0?'✓':'○')+'</span>'
+      +' <strong>Auto-backup lokal:</strong> '+lastLocal+' ('+rows+' hari)</div>'
+      +'<div><span style="color:'+(copyOk?'var(--green)':'var(--amber)')+'">'+( copyOk?'✓':'⚠')+'</span>'
+      +' <strong>Salinan cadangan:</strong> '+(copyOk?'Ada':'Belum ada')+'</div>'
+      +'<div><span style="color:'+(log.lastExport?'var(--green)':'var(--red)')+'">'+( log.lastExport?'✓':'✗')+'</span>'
+      +' <strong>Export terakhir:</strong> '+lastExport+'</div>'
+      +'<div><span style="color:'+(isCloud?'var(--green)':'var(--amber)')+'">'+( isCloud?'✓':'○')+'</span>'
+      +' <strong>Cloud sync:</strong> '+(isCloud?'Terhubung':'Belum diatur')+'</div>';
+  }
+}
+
+// ── Auto-backup terjadwal setiap 30 menit ───────────────────
+let _backupInterval=null;
+// ── Auto-reconnect Firebase saat internet kembali ───────────
+window.addEventListener('online', ()=>{
+  if(!_fbInited){
+    setCloudStatus('loading','↻ Reconnecting...');
+    setTimeout(()=>{
+      fbInit().then(ok=>{
+        if(ok) fbLoadAll().then(()=>fbStartListener());
+      });
+    }, 1000);
+  }
+});
+window.addEventListener('offline', ()=>{
+  setCloudStatus('local','● Offline — data tersimpan lokal');
+});
+
+function startAutoBackup(){
+  if(_backupInterval)clearInterval(_backupInterval);
+  autoBackupLocal(); // langsung backup saat start
+  _backupInterval=setInterval(()=>{
+    autoBackupLocal();
+    // Coba cloud sync jika terhubung dan ada data baru
+    if(getCloudUrl()&&state.savedData.length>0){
+      const log=JSON.parse(localStorage.getItem(BACKUP_LOG_KEY)||'{}');
+      const lastCloud=log.lastCloud?new Date(log.lastCloud):new Date(0);
+      const minsAgo=(Date.now()-lastCloud)/60000;
+      if(minsAgo>60){ // sync cloud tiap 1 jam
+        cloudSyncSilent();
+      }
+    }
+  },30*60*1000); // 30 menit
+}
+
+// ── Cloud sync diam-diam (tanpa toast) ──────────────────────
+async function cloudSyncSilent(){
+  const url=getCloudUrl();if(!url)return;
+  try{
+    for(const rec of state.savedData.slice(0,7)){ // sync 7 hari terakhir
+      await cloudSave(rec);
+    }
+    const log=JSON.parse(localStorage.getItem(BACKUP_LOG_KEY)||'{}');
+    log.lastCloud=new Date().toISOString();
+    localStorage.setItem(BACKUP_LOG_KEY,JSON.stringify(log));
+    updateBackupStatus();
+  }catch(e){}
+}
+
+// ── Override dbSave untuk auto-backup ───────────────────────
+// auto-backup terintegrasi di dbSave utama
+
+// ─── CLOUD SYNC ──────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+//  FIREBASE REALTIME DATABASE — MULTI-DEVICE SYNC
+//  Menggantikan Apps Script lama
+// ═══════════════════════════════════════════════════════════════
+
+// ── Konfigurasi Firebase ─────────────────────────────────────
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCKWvOV4r7yHm6jq773cI72sY_3-hxXIoc",
+  authDomain: "spbu-manager-efcd2.firebaseapp.com",
+  databaseURL: "https://spbu-manager-efcd2-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "spbu-manager-efcd2",
+  storageBucket: "spbu-manager-efcd2.firebasestorage.app",
+  messagingSenderId: "258028362337",
+  appId: "1:258028362337:web:a142ff5b757d48508e2820"
+};
+
+// ── State Firebase ───────────────────────────────────────────
+let _fbApp    = null;
+let _fbDb     = null;
+let _fbInited = false;
+let _fbOnline = false;
+let _fbListeners = {};  // tanggal → listener unsubscribe
+
+// ── Inisialisasi Firebase ────────────────────────────────────
+async function fbInit(){
+  if(_fbInited && _fbDb) return true;
+  try{
+    if(!window.firebase){
+      await Promise.all([
+        loadScript('https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js'),
+      ]).then(()=>loadScript('https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js'));
+    }
+    if(!window.firebase) throw new Error('SDK gagal dimuat');
+    try{ _fbApp=firebase.app(); }
+    catch(e){ _fbApp=firebase.initializeApp(FIREBASE_CONFIG); }
+    _fbDb=firebase.database();
+    // Test tulis kecil untuk verifikasi rules
+    await _fbDb.ref(FB_ROOT+'/ping').set({t:Date.now(),v:'ok'});
+    _fbInited=true; _fbOnline=true;
+    setCloudStatus('active','● Terhubung');
+    return true;
+  }catch(err){
+    console.error('Firebase init error:',err);
+    // Jika error rules/permission — tampilkan pesan jelas
+    if(err.message&&(err.message.includes('PERMISSION_DENIED')||err.message.includes('permission'))){
+      setCloudStatus('error','✕ Rules Firebase perlu diperbarui');
+      _showFirebaseRulesAlert();
+    }else{
+      setCloudStatus('error','✕ Offline — data tersimpan lokal');
+    }
+    return false;
+  }
+}
+
+function _showFirebaseRulesAlert(){
+  // Tampilkan banner sekali saja
+  if(document.getElementById('fb-rules-alert')) return;
+  const banner=document.createElement('div');
+  banner.id='fb-rules-alert';
+  banner.style.cssText='position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:9999;background:#fff;border:2px solid var(--red);border-radius:12px;padding:16px 20px;max-width:480px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.2);font-size:13px';
+  banner.innerHTML=''
+    +'<div style="font-weight:700;color:var(--red);margin-bottom:8px">⚠ Firebase Rules Perlu Diperbarui</div>'
+    +'<div style="color:var(--text2);margin-bottom:12px;line-height:1.6">'
+    +'Rules "test mode" sudah expired. Buka Firebase Console dan perbarui rules.<br>'
+    +'<a href="https://console.firebase.google.com/project/spbu-manager-efcd2/database/spbu-manager-efcd2-default-rtdb/rules" '
+    +'target="_blank" style="color:var(--blue);font-weight:600">→ Buka Firebase Rules</a>'
+    +'</div>'
+    +'<div style="background:var(--surface2);border-radius:8px;padding:10px;font-family:monospace;font-size:11px;margin-bottom:10px">'
+    +'{"rules":{"spbu_v1":{".read":true,".write":true}}}'
+    +'</div>'
+    +'<button onclick="this.parentElement.remove()" style="background:var(--red);color:#fff;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:12px">Tutup</button>';
+  document.body.appendChild(banner);
+}
+
+function loadScript(src){
+  return new Promise((resolve,reject)=>{
+    if(document.querySelector('script[src="'+src+'"]')){resolve();return;}
+    const s=document.createElement('script');
+    s.src=src; s.onload=resolve; s.onerror=reject;
+    document.head.appendChild(s);
+  });
+}
+
+// ── Path helper ──────────────────────────────────────────────
+function fbPath(path){ return _fbDb.ref(path); }
+const FB_ROOT = 'spbu_v1';  // root node di Firebase
+
+// ── Simpan satu hari ke Firebase ─────────────────────────────
+async function fbSaveDay(rec){
+  if(!rec||!rec.tanggal) return false;
+  if(!await fbInit()) return false;
+  try{
+    setCloudStatus('syncing','↻ Menyimpan...');
+    await fbPath(FB_ROOT+'/data/'+rec.tanggal).set(rec);
+    setCloudStatus('active','● Tersimpan '+rec.tanggal);
+    return true;
+  }catch(err){
+    setCloudStatus('error','✕ '+err.message);
+    return false;
+  }
+}
+
+// ── Muat semua data dari Firebase ────────────────────────────
+async function fbLoadAll(){
+  if(!await fbInit()) return false;
+  try{
+    setCloudStatus('loading','↻ Memuat data...');
+    const snap = await fbPath(FB_ROOT+'/data').get();
+    if(snap.exists()){
+      const obj = snap.val();
+      const rows = Object.values(obj).sort((a,b)=>a.tanggal>b.tanggal?-1:1);
+      state.savedData = rows;
+      dbSave();
+      setCloudStatus('active','● '+rows.length+' hari data dimuat');
+      toast('✓ '+rows.length+' hari data dimuat dari Firebase');
+    }else{
+      setCloudStatus('active','● Firebase Aktif (belum ada data)');
+    }
+    return true;
+  }catch(err){
+    setCloudStatus('error','✕ Gagal muat: '+err.message);
+    return false;
+  }
+}
+
+// ── Realtime listener — auto-update saat ada perubahan ───────
+function fbStartListener(){
+  if(!_fbInited||!_fbDb) return;
+
+  // ── Listener 1: Data penjualan harian ───────────────────
+  const ref = fbPath(FB_ROOT+'/data');
+  ref.on('value', snap=>{
+    if(!snap.exists()) return;
+    const obj = snap.val();
+    const rows = Object.values(obj).sort((a,b)=>a.tanggal>b.tanggal?-1:1);
+    state.savedData = rows;
+    dbSave();
+    updateBackupStatus();
+    if(currentPage==='dashboard') showPage('dashboard');
+    if(currentPage==='histori')   showPage('histori');
+    setCloudStatus('active','● Live · '+rows.length+' hari');
+  }, err=>{
+    setCloudStatus('error','✕ '+err.message);
+  });
+
+  // ── Listener 2: App state (harga, beban, profil) ─────────
+  const appRef = fbPath(FB_ROOT+'/appstate');
+  appRef.on('value', snap=>{
+    if(!snap.exists()) return;
+    const d = snap.val();
+    if(d.bbmConfig&&Array.isArray(d.bbmConfig)){
+      saveBBMConfig(d.bbmConfig);
+      // Refresh halaman yang terpengaruh
+      if(['harga','input','pengaturan'].includes(currentPage)) showPage(currentPage);
+    }
+    if(d.harga){
+      // Validasi margin sebelum timpa harga lokal
+      const mergedH={...state.harga};
+      let updated=false;
+      Object.keys(d.harga).forEach(k=>{
+        if(!k.startsWith('hpp_')){
+          const hj=d.harga[k]||0;
+          const hpp=d.harga['hpp_'+k]||0;
+          if(hj>0&&hj>hpp){mergedH[k]=hj;mergedH['hpp_'+k]=hpp;updated=true;}
+        }
+      });
+      if(updated){state.harga=mergedH;saveHargaLocal();}
+      if(currentPage==='harga') showPage('harga');
+    }
+    if(d.bebanUsaha) state.bebanUsaha = d.bebanUsaha;
+    if(d.riwayatHarga) state.riwayatHarga = d.riwayatHarga;
+    if(d.profil) saveProfil(d.profil);
+    dbSave();
+  });
+}
+
+// ── Simpan state app (beban, harga, profil) ke Firebase ──────
+async function fbSaveAppState(){
+  if(!await fbInit()) return false;
+  try{
+    await fbPath(FB_ROOT+'/appstate').set({
+      bebanUsaha: state.bebanUsaha||[],
+      bebanId: state.bebanId||1,
+      harga: state.harga,
+      riwayatHarga: state.riwayatHarga||[],
+      profil: getProfil(),
+      bbmConfig: loadBBMConfig(),
+      penerimaan: state.penerimaan||[],
+      penerimaanId: state.penerimaanId||1,
+      updatedAt: new Date().toISOString()
+    });
+    return true;
+  }catch(e){ return false; }
+}
+
+// ── Muat app state dari Firebase ─────────────────────────────
+async function fbLoadAppState(){
+  if(!await fbInit()) return false;
+  try{
+    const snap = await fbPath(FB_ROOT+'/appstate').get();
+    if(snap.exists()){
+      const d = snap.val();
+      if(d.bebanUsaha)   state.bebanUsaha   = d.bebanUsaha;
+      if(d.bebanId)      state.bebanId      = d.bebanId;
+      if(d.penerimaan)   state.penerimaan   = d.penerimaan;
+      if(d.penerimaanId) state.penerimaanId = d.penerimaanId;
+      if(d.bbmConfig&&Array.isArray(d.bbmConfig)){
+        saveBBMConfig(d.bbmConfig); // Rebuild BBM globals
+      }
+      if(d.harga){
+        // Validasi: hanya terima harga jika margin positif
+        const mH={...state.harga};
+        Object.keys(d.harga).forEach(k=>{
+          if(!k.startsWith('hpp_')){
+            const hj=d.harga[k]||0;
+            const hpp=d.harga['hpp_'+k]||0;
+            if(hj>0&&hj>hpp){mH[k]=hj;mH['hpp_'+k]=hpp;}
+          }
+        });
+        state.harga=mH;
+        saveHargaLocal();
+      }
+      if(d.riwayatHarga) state.riwayatHarga = d.riwayatHarga;
+      if(d.profil)     saveProfil(d.profil);
+      dbSave();
+    }
+    return true;
+  }catch(e){ return false; }
+}
+
+// ── Sync semua data lokal ke Firebase ────────────────────────
+async function fbSyncAll(){
+  if(!await fbInit()){toast('⚠ Firebase tidak terhubung');return;}
+  setCloudStatus('syncing','↻ Sync semua...');
+  let ok=0, fail=0;
+  for(const rec of state.savedData){
+    const r = await fbSaveDay(rec);
+    if(r) ok++; else fail++;
+  }
+  await fbSaveAppState();
+  if(fail===0){
+    toast('✓ '+ok+' hari data berhasil disinkronkan ke Firebase!');
+    setCloudStatus('active','● '+ok+' hari tersinkron');
+  }else{
+    toast('⚠ '+ok+' berhasil, '+fail+' gagal');
+    setCloudStatus('error','✕ '+fail+' data gagal');
+  }
+  if(e('main-content')&&currentPage==='database') renderDBPage(e('main-content'));
+}
+
+// ── Tes koneksi Firebase ─────────────────────────────────────
+async function testCloud(){
+  const btn = event?.target;
+  if(btn){btn.disabled=true;btn.textContent='↻ Testing...';}
+  const ok = await fbInit();
+  if(ok){
+    try{
+      await fbPath(FB_ROOT+'/ping').set({t:Date.now()});
+      toast('✓ Firebase terhubung! Multi-device aktif.');
+      setCloudStatus('active','● Firebase OK');
+    }catch(e){
+      toast('⚠ Firebase error: '+e.message);
+      setCloudStatus('error','✕ '+e.message);
+    }
+  }else{
+    toast('⚠ Firebase gagal terhubung');
+  }
+  if(btn){btn.disabled=false;btn.textContent='🔌 Test Koneksi';}
+}
+
+// ── Fungsi lama (kompatibilitas) — dialihkan ke Firebase ─────
+const CLOUD_KEY = 'spbu_firebase_active';
+function getCloudUrl(){ return localStorage.getItem(CLOUD_KEY)||(_fbInited?'firebase':''); }
+function setCloudUrl(url){ localStorage.setItem(CLOUD_KEY,url); }
+async function cloudSave(rec){ return {ok: await fbSaveDay(rec)}; }
+async function cloudLoad(){ return fbLoadAll(); }
+async function cloudSyncAll(){ return fbSyncAll(); }
+
+// ── Status indikator di topbar ────────────────────────────────
+function setCloudStatus(status, msg){
+  const dot   = document.querySelector('.db-dot');
+  const badge = document.querySelector('.db-badge');
+  const map = {
+    active:  {bg:'#4CAF50', text:'● Firebase Aktif'},
+    syncing: {bg:'#F5C518', text:'↻ Menyinkron...'},
+    error:   {bg:'#e53935', text:'✕ Gagal'},
+    loading: {bg:'#F5C518', text:'↻ Memuat...'},
+    local:   {bg:'#2196F3', text:'● Lokal'},
+  };
+  const s = map[status]||map.local;
+  if(dot)  dot.style.background = s.bg;
+  if(badge) badge.innerHTML = '<span class="db-dot" style="background:'+s.bg+'"></span> '+(msg||s.text);
+  updateBackupStatus();
+}
+
+
+
+function renderDBPage(main){
+  const dbSize=JSON.stringify(state).length;
+  const dbSizeKb=(dbSize/1024).toFixed(1);
+  const cloudUrl=getCloudUrl();
+  const isCloud=!!cloudUrl;
+  const cloudStatusHtml=isCloud
+    ?`<div class="metric" style="border-color:var(--green-light);background:var(--green-bg)">
+        <div class="metric-label">Cloud Sync</div>
+        <div class="metric-value c-green" style="font-size:13px">● Terhubung</div>
+        <div class="metric-sub">Google Sheets aktif</div>
+      </div>`
+    :`<div class="metric" style="border-color:var(--amber-light);background:var(--amber-bg)">
+        <div class="metric-label">Cloud Sync</div>
+        <div class="metric-value c-amber" style="font-size:13px">○ Belum diatur</div>
+        <div class="metric-sub">Hanya tersimpan lokal</div>
+      </div>`;
+
+  // Update status
+  updateBackupStatus();
+  main.innerHTML=`
+  <div class="page-header">
+    <div class="page-title">💾 Database & Backup</div>
+    <div class="page-sub">Kelola penyimpanan lokal dan sinkronisasi ke Google Sheets</div>
+  </div>
+
+  <!-- METRICS -->
+  <div class="g4">
+    <div class="metric"><div class="metric-label">Total Rekaman</div><div class="metric-value c-blue">${state.savedData.length}</div><div class="metric-sub">data hari</div></div>
+    <div class="metric"><div class="metric-label">Ukuran Lokal</div><div class="metric-value">${dbSizeKb} KB</div><div class="metric-sub">localStorage</div></div>
+    <div class="metric"><div class="metric-label">Mode</div><div class="metric-value" style="font-size:13px">${isCloud?'☁ Cloud+Lokal':'💾 Lokal Only'}</div></div>
+    ${cloudStatusHtml}
+  </div>
+
+  <!-- KONEKSI PANEL -->
+  <div class="card" style="margin-bottom:12px;border:2px solid var(--blue-light)">
+    <div class="card-title" style="color:var(--blue)">🔗 Koneksi Database</div>
+
+    <!-- Status row -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-bottom:14px">
+      <div style="background:var(--green-bg);border:1px solid var(--green-light);border-radius:var(--radius);padding:12px">
+        <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">☁ Firebase Realtime DB</div>
+        <div class="db-badge" style="font-size:12px;font-weight:600">
+          <span class="db-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#F5C518;margin-right:6px"></span>
+          Menghubungkan...
+        </div>
+        <div style="font-size:11px;color:var(--text2);margin-top:4px">Real-time · Multi-device · Otomatis</div>
+      </div>
+      <div id="as-status-box" style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:12px">
+        <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">📊 Google Sheets (Apps Script)</div>
+        <div style="font-size:12px;font-weight:600;color:${localStorage.getItem(CLOUD_KEY)&&localStorage.getItem(CLOUD_KEY)!=='firebase'?'var(--green)':'var(--amber)'}">
+          ${localStorage.getItem(CLOUD_KEY)&&localStorage.getItem(CLOUD_KEY)!=='firebase'?'● Terhubung':'○ Belum diatur'}
+        </div>
+        <div style="font-size:11px;color:var(--text2);margin-top:4px">Backup ke Sheets · Laporan Excel</div>
+      </div>
+    </div>
+
+    <!-- Tombol aksi -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <button class="btn btn-primary btn-sm" onclick="testCloud()">🔌 Test Semua Koneksi</button>
+      <button class="btn btn-ghost btn-sm" onclick="syncKeduanya()">↻ Sync ke Semua</button>
+      <button class="btn btn-ghost btn-sm" onclick="fbLoadAll().then(()=>fbLoadAppState())">⬇ Ambil dari Firebase</button>
+    </div>
+
+    <!-- Input URL Apps Script -->
+    <div style="background:var(--surface2);border-radius:var(--radius);padding:12px 14px;margin-bottom:10px">
+      <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px">
+        📊 URL Apps Script (Google Sheets)
+        <span style="font-size:10px;font-weight:400;color:var(--text3);margin-left:6px">— opsional, untuk backup ke Sheets</span>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <input type="text" class="inp" id="cloud-url-input"
+          value="${localStorage.getItem(CLOUD_KEY)&&localStorage.getItem(CLOUD_KEY)!=='firebase'?localStorage.getItem(CLOUD_KEY):''}"
+          placeholder="https://script.google.com/macros/s/xxxxx/exec"
+          style="font-size:11px;font-family:monospace;flex:1">
+        <button class="btn btn-save btn-sm" onclick="simpanUrlCloud()">💾 Simpan</button>
+        ${localStorage.getItem(CLOUD_KEY)&&localStorage.getItem(CLOUD_KEY)!=='firebase'
+          ?'<button class="btn btn-ghost btn-sm" onclick="migrasiSheetsKeFirebase()">📥 Migrasi Sheets→Firebase</button>':''}
+      </div>
+      <div style="font-size:11px;color:var(--text2)">
+        Setelah diisi: data otomatis tersimpan ke <strong>Firebase</strong> (real-time) DAN <strong>Google Sheets</strong> (backup) setiap kali simpan.
+      </div>
+    </div>
+
+    <!-- Log koneksi -->
+    <div id="cloud-status-card" style="display:${localStorage.getItem(CLOUD_KEY)?'block':'none'}">
+      <div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px">Log Koneksi:</div>
+      <div id="cloud-log" style="font-size:12px;color:var(--text2);line-height:2;background:var(--surface2);padding:10px 12px;border-radius:var(--radius)">
+        Tekan "Test Semua Koneksi" untuk memeriksa status.
+      </div>
+    </div>
+
+    <div style="margin-top:10px;padding:8px 12px;background:var(--blue-bg);border-radius:var(--radius);font-size:11px;color:var(--blue)">
+      💡 <strong>Multi-device:</strong> Kirim file <code>spbu_manager.html</code> ke HP/komputer lain → buka di browser → otomatis terhubung ke data yang sama.
+    </div>
+  </div>
+
+  <!-- BACKUP PANEL -->
+  <div class="card" style="margin-bottom:12px;border:2px solid var(--green-light)">
+    <div class="card-title" style="color:var(--green)">🛡 Backup & Pemulihan Data</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:14px">
+
+      <!-- Export -->
+      <div style="background:var(--green-bg);border:1px solid var(--green-light);border-radius:var(--radius);padding:14px">
+        <div style="font-weight:700;font-size:13px;color:var(--green);margin-bottom:6px">📥 Export Backup</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Unduh semua data sebagai file JSON. Simpan di HP atau Google Drive Anda.</div>
+        <button class="btn btn-primary btn-sm" onclick="exportBackupJSON()" style="width:100%">⬇ Download Backup Sekarang</button>
+      </div>
+
+      <!-- Import -->
+      <div style="background:var(--blue-bg);border:1px solid var(--blue-light);border-radius:var(--radius);padding:14px">
+        <div style="font-weight:700;font-size:13px;color:var(--blue);margin-bottom:6px">📤 Import / Pulihkan</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:10px">Pulihkan data dari file backup JSON yang pernah didownload.</div>
+        <label style="display:block;width:100%">
+          <span class="btn btn-ghost btn-sm" style="width:100%;display:block;text-align:center;cursor:pointer">⬆ Pilih File Backup (.json)</span>
+          <input type="file" accept=".json" onchange="importBackupJSON(this.files[0])" style="display:none">
+        </label>
+      </div>
+    </div>
+
+    <!-- Status backup -->
+    <div style="background:var(--surface2);border-radius:var(--radius);padding:10px 14px;font-size:12px">
+      <div style="font-weight:700;color:var(--text2);margin-bottom:6px;text-transform:uppercase;font-size:10px;letter-spacing:.06em">Status Perlindungan Data</div>
+      <div id="backup-status-db"></div>
+    </div>
+
+    <div style="margin-top:10px;padding:8px 12px;background:var(--amber-bg);border-radius:var(--radius);font-size:11px;color:var(--amber)">
+      💡 <strong>Rekomendasi:</strong> Download backup setiap akhir bulan dan simpan di Google Drive atau WhatsApp ke diri sendiri. Auto-backup lokal aktif setiap 30 menit.
+    </div>
+  </div>
+
+  <!-- CLOUD SETUP -->
+  <div class="card" style="border:2px solid ${isCloud?'var(--green-light)':'var(--amber-light)'}">
+    <div class="card-title" style="color:${isCloud?'var(--green)':'var(--amber)'}">
+      ☁ Koneksi Google Sheets (Cloud)
+      ${isCloud?'<span class="state-badge sb-saved">✓ Terhubung</span>':'<span class="state-badge sb-edit">Belum diatur</span>'}
+    </div>
+
+    ${isCloud?`
+    <div class="nt nt-s" style="margin-bottom:14px">✓ Aplikasi terhubung ke Google Sheets. Setiap simpan data akan otomatis tersinkron ke cloud.</div>
+    <div class="fg" style="margin-bottom:12px">
+      <label>URL Apps Script Aktif</label>
+      <div style="display:flex;gap:8px">
+        <input type="text" class="inp" id="cloud-url-input" value="${cloudUrl}" style="font-size:11px;font-family:monospace">
+        <button class="btn btn-ghost" onclick="document.getElementById('cloud-url-input').type==='password'?document.getElementById('cloud-url-input').type='text':document.getElementById('cloud-url-input').type='password'">👁</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-save" onclick="simpanUrlCloud()">💾 Update URL</button>
+      <button class="btn btn-primary" onclick="testCloud()">🔌 Test Koneksi</button>
+      <button class="btn btn-ghost" onclick="muatDariCloud()">☁ Muat dari Cloud</button>
+      <button class="btn btn-ghost" onclick="cloudSyncAll()">↑ Sync Semua ke Cloud</button>
+      <button class="btn btn-reset" onclick="hapusUrlCloud()">✕ Putus Koneksi</button>
+    </div>`:`
+    <div class="nt nt-w" style="margin-bottom:14px">
+      ⚠ Tanpa cloud sync, data hanya tersimpan di browser perangkat ini. Manager dan owner tidak bisa berbagi data secara real-time.
+    </div>
+    <div style="background:var(--surface2);border-radius:var(--radius);padding:14px;margin-bottom:14px;font-size:13px;line-height:1.8">
+      <strong>Langkah setup (lakukan sekali):</strong><br>
+      1. Buka <a href="https://script.google.com" target="_blank" style="color:var(--blue)">script.google.com</a> → New Project<br>
+      2. Paste kode Apps Script di bawah → Deploy sebagai Web App<br>
+      3. Pilih <em>"Execute as: Me"</em> dan <em>"Anyone"</em><br>
+      4. Copy URL deployment → paste di bawah
+    </div>
+    <details style="margin-bottom:14px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--blue);padding:8px 0">📋 Lihat Kode Apps Script (klik untuk buka)</summary>
+      <pre style="background:var(--text);color:#e8e8e8;padding:14px;border-radius:var(--radius);font-size:11px;overflow-x:auto;margin-top:8px;line-height:1.6">const SHEET_ID = 'ISI_ID_SPREADSHEET_KAMU';
+const SHEET_NAME = 'Data';
+
+function doPost(e) {
+  try {
+    const payload = JSON.parse(e.postData.contents);
+    if (payload.action === 'save') return saveData(payload.data);
+    if (payload.action === 'loadAll') return loadAll();
+    return respond({status:'error',msg:'Unknown action'});
+  } catch(err) {
+    return respond({status:'error',msg:err.message});
+  }
+}
+
+function doGet(e) { return loadAll(); }
+
+function saveData(data) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  let sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
+  const rows = sheet.getLastRow() > 0
+    ? sheet.getRange(1,1,sheet.getLastRow(),1).getValues() : [];
+  let found = -1;
+  for (let i = 0; i &lt; rows.length; i++) {
+    if (rows[i][0] === data.tanggal) { found = i+1; break; }
+  }
+  const row = [data.tanggal, JSON.stringify(data), new Date().toISOString()];
+  if (found > 0) sheet.getRange(found,1,1,3).setValues([row]);
+  else sheet.appendRow(row);
+  if (sheet.getLastRow() > 1)
+    sheet.getRange(1,1,sheet.getLastRow(),3).sort({column:1,ascending:false});
+  return respond({status:'ok',tanggal:data.tanggal});
+}
+
+function loadAll() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet || sheet.getLastRow() === 0) return respond({status:'ok',data:[]});
+  const rows = sheet.getDataRange().getValues();
+  const data = rows.map(r => { try{return JSON.parse(r[1]);}catch(e){return null;} }).filter(Boolean);
+  return respond({status:'ok',data});
+}
+
+function respond(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}</pre>
+    </details>
+    <div class="fg" style="margin-bottom:12px">
+      <label>URL Apps Script (setelah deploy)</label>
+      <input type="text" class="inp" id="cloud-url-input" placeholder="https://script.google.com/macros/s/xxxxx/exec">
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-save" onclick="simpanUrlCloud()">💾 Simpan & Aktifkan</button>
+      <button class="btn btn-ghost" onclick="testCloud()">🔌 Test Koneksi</button>
+    </div>`}
+  </div>
+
+  <!-- STATUS REALTIME -->
+  <div class="card" id="cloud-status-card" style="display:${isCloud?'block':'none'}">
+    <div class="card-title">📡 Status Sinkronisasi</div>
+    <div id="cloud-log" style="font-size:12px;color:var(--text2);line-height:2">
+      Tekan "Test Koneksi" untuk memeriksa status cloud.
+    </div>
+  </div>
+
+  <!-- EKSPOR / IMPOR LOKAL -->
+  <div class="card">
+    <div class="card-title">📁 Backup Lokal (JSON)</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:16px">
+        <div style="font-size:13px;font-weight:700;margin-bottom:8px">📤 Ekspor ke File JSON</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:12px">Download semua data sebagai file backup.</div>
+        <button class="btn btn-primary" onclick="exportData()">💾 Download Backup</button>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:16px">
+        <div style="font-size:13px;font-weight:700;margin-bottom:8px">📥 Impor dari File JSON</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:12px">Muat data dari file backup JSON.</div>
+        <label class="btn btn-ghost" style="cursor:pointer">📂 Pilih File <input type="file" accept=".json" style="display:none" onchange="importData(event)"></label>
+      </div>
+    </div>
+  </div>
+
+  <!-- PROFIL PERUSAHAAN -->
+  <div class="card" style="border:1.5px solid var(--blue-light)">
+    <div class="card-title" style="color:var(--blue)">🏢 Profil Perusahaan</div>
+    <div class="nt nt-i" style="margin-bottom:14px">Nama dan informasi SPBU ini akan muncul di semua laporan yang dicetak.</div>
+    <div class="g2" style="margin-bottom:12px">
+      <div class="fg">
+        <label>Nama Perusahaan / SPBU</label>
+        <input type="text" class="inp" id="profil-nama" placeholder="cth: SPBU 34.123.01 Mataram" value="${esc(getProfil().nama||'')}">
+      </div>
+      <div class="fg">
+        <label>No. SPBU Pertamina</label>
+        <input type="text" class="inp" id="profil-nospbu" placeholder="cth: 34.123.01" value="${esc(getProfil().noSpbu||'')}">
+      </div>
+    </div>
+    <div class="g2" style="margin-bottom:14px">
+      <div class="fg">
+        <label>Alamat</label>
+        <input type="text" class="inp" id="profil-alamat" placeholder="Alamat SPBU" value="${esc(getProfil().alamat||'')}">
+      </div>
+      <div class="fg">
+        <label>Telepon</label>
+        <input type="text" class="inp" id="profil-telp" placeholder="No. telepon" value="${esc(getProfil().telp||'')}">
+      </div>
+    </div>
+    <button class="btn btn-save" onclick="simpanProfil()">💾 Simpan Profil</button>
+  </div>
+
+  <!-- GANTI PASSWORD (owner only) -->
+  ${currentUser&&currentUser.role==='owner'?`
+  <div class="card" style="border:1.5px solid var(--amber-light)">
+    <div class="card-title" style="color:var(--amber)">🔑 Ganti Password</div>
+    <div class="nt nt-w" style="margin-bottom:14px">Ganti password default sebelum digunakan secara live. Password disimpan di browser ini.</div>
+    <div class="g2" style="margin-bottom:14px">
+      <div class="fg">
+        <label>Password Owner (baru)</label>
+        <input type="password" class="inp" id="new-pwd-owner" placeholder="Password owner baru">
+      </div>
+      <div class="fg">
+        <label>Password Manager (baru)</label>
+        <input type="password" class="inp" id="new-pwd-manager" placeholder="Password manager baru">
+      </div>
+    </div>
+    <button class="btn btn-save" onclick="gantiPassword()">💾 Simpan Password Baru</button>
+  </div>`:''}
+
+  <!-- DANGER ZONE -->
+  <div class="card">
+    <div class="card-title" style="color:var(--red)">⚠ Zona Berbahaya</div>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px">Hapus semua data lokal. Data di cloud tidak ikut terhapus.</div>
+    <button class="btn btn-danger" onclick="if(confirm('HAPUS SEMUA DATA LOKAL? Data di cloud aman.')){state.savedData=[];dbSave();renderDBPage(e('main-content'));toast('Data lokal dihapus.')}">🗑 Hapus Data Lokal</button>
+  </div>`;
+}
+
+function simpanUrlCloud(){
+  const url=(document.getElementById('cloud-url-input')?.value||'').trim();
+  if(!url){toast('⚠ URL tidak boleh kosong!');return;}
+  if(!url.startsWith('https://')){toast('⚠ URL harus dimulai dengan https://');return;}
+  setCloudUrl(url);
+  toast('✓ URL disimpan! Menguji koneksi...');
+  renderDBPage(e('main-content'));
+  setTimeout(testCloud,500);
+}
+
+function hapusUrlCloud(){
+  if(!confirm('Putus koneksi cloud? Data lokal tetap aman.'))return;
+  localStorage.removeItem(CLOUD_KEY);
+  setCloudStatus('local','● LocalStorage');
+  renderDBPage(e('main-content'));
+  toast('Koneksi cloud diputus.');
+}
+
+async function testCloud(){
+  const log=e('cloud-log');
+  const card=e('cloud-status-card');
+  if(card)card.style.display='block';
+  let html='';
+
+  // ── Test Firebase ────────────────────────────────────────
+  html+='<div style="font-weight:700;color:var(--text2);margin-bottom:6px">☁ Firebase Realtime DB</div>';
+  try{
+    const ok=await fbInit();
+    if(ok){
+      await fbPath(FB_ROOT+'/ping').set({t:Date.now()});
+      html+='<span style="color:var(--green)">✓ Firebase terhubung!</span> Data real-time aktif di semua device.<br>';
+      setCloudStatus('active','● Firebase Aktif');
+    }else throw new Error('Inisialisasi gagal');
+  }catch(err){
+    html+='<span style="color:var(--red)">✕ Firebase gagal: '+err.message+'</span><br>';
+  }
+
+  // ── Test Apps Script (Google Sheets) ────────────────────
+  html+='<div style="font-weight:700;color:var(--text2);margin:10px 0 6px">📊 Google Sheets (Apps Script)</div>';
+  const url=localStorage.getItem(CLOUD_KEY)||'';
+  if(!url||url==='firebase'){
+    html+='<span style="color:var(--amber)">○ Belum diatur.</span> Isi URL Apps Script di bawah untuk aktifkan backup ke Google Sheets.<br>';
+  }else{
+    try{
+      const res=await fetch(url+'?action=load');
+      if(!res.ok)throw new Error('HTTP '+res.status);
+      const json=await res.json();
+      if(json.status==='ok'){
+        html+='<span style="color:var(--green)">✓ Apps Script terhubung!</span> '
+          +json.data.length+' rekaman di Sheets.'
+          +(json.data.length?'<br>📅 Data terbaru: <strong>'+json.data[0].tanggal+'</strong>':'')+'<br>';
+      }else throw new Error(json.msg);
+    }catch(err){
+      html+='<span style="color:var(--red)">✕ Apps Script gagal: '+err.message+'</span><br>'
+        +'<span style="font-size:11px;color:var(--text2)">Cek URL dan pastikan deploy dengan akses "Anyone".</span><br>';
+    }
+  }
+
+  html+='<span style="font-size:11px;color:var(--text3)">🕐 Diuji: '+new Date().toLocaleString('id-ID')+'</span>';
+  if(log)log.innerHTML=html;
+  toast('✓ Tes koneksi selesai');
+}
+
+async function muatDariCloud(){
+  if(!confirm('Muat semua data dari cloud? Data lokal akan diganti dengan data cloud.'))return;
+  const r=await cloudLoad();
+  if(r.ok){
+    toast('✓ '+r.count+' data berhasil dimuat dari cloud!');
+    renderDBPage(e('main-content'));
+    // Refresh halaman aktif
+    showPage(currentPage);
+  }else{
+    toast('✕ Gagal muat: '+r.msg);
+  }
+}
+
+// ── Migrasi: tarik data dari Google Sheets → Firebase ───────
+async function migrasiSheetsKeFirebase(){
+  const url=localStorage.getItem(CLOUD_KEY)||'';
+  if(!url||url==='firebase'){
+    toast('⚠ URL Apps Script belum diatur!');return;
+  }
+  if(!confirm('Tarik semua data dari Google Sheets ke Firebase?\nProses ini akan menggabungkan data — tidak ada yang dihapus.'))return;
+
+  toast('↻ Mengambil data dari Sheets...');
+  try{
+    // 1. Ambil dari Sheets
+    const res=await fetch(url+'?action=load');
+    const json=await res.json();
+    if(json.status!=='ok')throw new Error(json.msg||'Gagal');
+    const sheetsData=json.data||[];
+    if(!sheetsData.length){toast('⚠ Tidak ada data di Sheets.');return;}
+
+    // 2. Merge dengan data lokal
+    const merged={};
+    state.savedData.forEach(d=>merged[d.tanggal]=d);
+    sheetsData.forEach(d=>merged[d.tanggal]=d);
+    state.savedData=Object.values(merged).sort((a,b)=>a.tanggal>b.tanggal?-1:1);
+    dbSave();
+
+    // 3. Push semua ke Firebase
+    if(!await fbInit())throw new Error('Firebase tidak terhubung');
+    let ok=0;
+    for(const rec of state.savedData){
+      await fbSaveDay(rec);ok++;
+      if(ok%5===0)setCloudStatus('syncing','↻ '+ok+'/'+state.savedData.length+'...');
+    }
+    setCloudStatus('active','● '+ok+' hari tersinkron');
+    toast('✓ Migrasi selesai! '+ok+' hari data dari Sheets → Firebase');
+    renderDBPage(e('main-content'));
+  }catch(err){
+    toast('✕ Gagal migrasi: '+err.message);
+    setCloudStatus('error','✕ '+err.message);
+  }
+}
+
+// ── Sinkronisasi dua arah: Firebase ↔ Sheets ────────────────
+async function syncKeduanya(){
+  const url=localStorage.getItem(CLOUD_KEY)||'';
+  if(!url||url==='firebase'){
+    // Hanya sync ke Firebase
+    await fbSyncAll();return;
+  }
+  // Sync ke Firebase + Sheets bersamaan
+  setCloudStatus('syncing','↻ Sync ke semua...');
+  let fbOk=0,asOk=0,fail=0;
+  for(const rec of state.savedData){
+    const r1=fbSaveDay(rec);
+    const r2=fetch(url,{method:'POST',headers:{'Content-Type':'text/plain'},
+      body:JSON.stringify({action:'save',data:rec})}).then(r=>r.json());
+    const [fb,as]=await Promise.allSettled([r1,r2]);
+    if(fb.status==='fulfilled'&&fb.value)fbOk++;
+    if(as.status==='fulfilled'&&as.value?.status==='ok')asOk++;else fail++;
+  }
+  await fbSaveAppState();
+  setCloudStatus('active','● Firebase '+fbOk+' | Sheets '+asOk);
+  toast('✓ Firebase: '+fbOk+' hari | Sheets: '+asOk+' hari');
+  renderDBPage(e('main-content'));
+}
+
+function exportData(){
+  const json=JSON.stringify(state,null,2);
+  const blob=new Blob([json],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;a.download=`spbu_backup_${new Date().toISOString().slice(0,10)}.json`;
+  a.click();URL.revokeObjectURL(url);
+  toast('✓ Data berhasil diekspor!');
+}
+
+function importData(ev){
+  const file=ev.target.files[0];if(!file)return;
+  const reader=new FileReader();
+  reader.onload=ev2=>{
+    try{
+      const parsed=JSON.parse(ev2.target.result);
+      if(!parsed.savedData)throw new Error('Format file tidak valid');
+      Object.assign(state,parsed);dbSave();
+      toast('✓ Data berhasil diimpor! '+state.savedData.length+' rekaman.');
+      renderDBPage(e('main-content'));
+    }catch(err){toast('⚠ Gagal impor: '+err.message);}
+  };
+  reader.readAsText(file);
+}
+
+// ─── MISC ────────────────────────────────────────────────────
+
+// Cari stok akhir efektif dari hari sebelumnya di savedData
+function getPrevDayStock(tanggalStr,b){
+  // Ambil stok akhir dari data tersimpan TERAKHIR sebelum tanggal ini
+  // — otomatis menembus batas bulan, tahun, atau hari yang dilewat
+  if(!tanggalStr)return null;
+  const sorted=[...state.savedData]
+    .filter(d=>d.tanggal<tanggalStr)
+    .sort((a,b)=>a.tanggal>b.tanggal?-1:1); // desc: terbaru dulu
+  if(!sorted.length)return null;
+  const prevRec=sorted[0];
+  const lastShift=prevRec.shifts[prevRec.shifts.length-1];
+  return prevRec.shiftData[lastShift]?.[b]?.stokAkhirEfektif??null;
+}
+
+// Ambil tanggal dari data tersimpan terakhir sebelum tanggalStr
+function getPrevDayTanggal(tanggalStr){
+  if(!tanggalStr)return null;
+  const sorted=[...state.savedData]
+    .filter(d=>d.tanggal<tanggalStr)
+    .sort((a,b)=>a.tanggal>b.tanggal?-1:1);
+  return sorted.length?sorted[0].tanggal:null;
+}
+
+// Apakah tanggal ini adalah tanggal 1 bulan?
+function isTanggal1(tanggalStr){
+  if(!tanggalStr)return true;
+  return new Date(tanggalStr+'T00:00:00').getDate()===1;
+}
+
+function onTgl(){
+  const t=e('f-tanggal')?.value;
+  if(t&&e('f-hari'))e('f-hari').value=HARI[new Date(t+'T00:00:00').getDay()];
+  // Reset nilai awal di draft agar stok awal selalu fresh dari histori tanggal baru
+  // (nilai jual/tambah tetap terjaga di draft)
+  if(state.draft){
+    ['pagi','siang','malam'].forEach(sh=>{
+      if(state.draft[sh]){
+        BBM.forEach(b=>{if(state.draft[sh][b])state.draft[sh][b].awal=0;});
+      }
+    });
+  }
+  // Re-render shifts agar stok awal otomatis diupdate + calcAll untuk propagasi
+  renderShifts();calcAll();
+}
+
+// ─── INIT ────────────────────────────────────────────────────
+function gantiPassword(){
+  const ownerPwd=document.getElementById('new-pwd-owner')?.value?.trim();
+  const managerPwd=document.getElementById('new-pwd-manager')?.value?.trim();
+  if(!ownerPwd&&!managerPwd){toast('⚠ Isi minimal satu password baru!');return;}
+  const current=getPasswords();
+  if(ownerPwd){if(ownerPwd.length<4){toast('⚠ Password minimal 4 karakter!');return;}current.owner=ownerPwd;}
+  if(managerPwd){if(managerPwd.length<4){toast('⚠ Password minimal 4 karakter!');return;}current.manager=managerPwd;}
+  savePasswords(current);
+  if(document.getElementById('new-pwd-owner'))document.getElementById('new-pwd-owner').value='';
+  if(document.getElementById('new-pwd-manager'))document.getElementById('new-pwd-manager').value='';
+  toast('✓ Password berhasil diperbarui!');
+}
+
+function toggleMobileNav(){
+  const sb=document.getElementById('main-sidebar');
+  const ov=document.getElementById('mob-overlay');
+  if(!sb||!ov)return;
+  const isOpen=sb.classList.contains('mob-open');
+  if(isOpen){sb.classList.remove('mob-open');ov.classList.remove('show');}
+  else{sb.classList.add('mob-open');ov.classList.add('show');}
+}
+// Tutup mobile nav saat menu dipilih
+// mobile nav close integrated in toggleMobileNav
+
+function init(){
+  dbLoad();
+  checkAndRestoreBackup();
+  startAutoBackup();
+  // Init Firebase di background
+  fbInit().then(ok=>{
+    if(ok){
+      fbLoadAll().then(()=>fbLoadAppState()).then(()=>fbStartListener());
+    }
+  });
+  const now=new Date();
+  const tb=e('tb-date');
+  if(tb)tb.textContent=now.toLocaleDateString('id-ID',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+  // Mulai di halaman yang sesuai role
+  const startPage=currentUser&&currentUser.role==='owner'?'dashboard':'input';
+  showPage(startPage);
+  // Firebase sudah di-init di atas — tidak perlu cloudLoad manual
+}
+
+// ─── BOOT ────────────────────────────────────────────────
+(function boot(){
+  // ── STEP 1: Cek lisensi dulu sebelum apapun ──────────────
+  const licStatus=checkLicenseStatus();
+  if(!licStatus.valid){
+    showActivationScreen(licStatus.reason, licStatus);
+    return; // Stop — jangan tampilkan login
+  }
+
+  // ── STEP 2: Tampilkan warning jika lisensi hampir habis ───
+  showLicenseWarning();
+
+  // ── STEP 3: Cek session tersimpan ────────────────────────
+  try{
+    const sess=localStorage.getItem(AUTH_KEY);
+    if(sess){
+      const saved=JSON.parse(sess);
+      // Validasi struktur session
+      if(!saved||!saved.id||!saved.role){
+        localStorage.removeItem(AUTH_KEY);
+        return; // tampilkan login screen
+      }
+      // SELALU refresh dari users database (penting untuk update menu)
+      const fresh=getUserById(saved.id);
+      if(fresh){
+        currentUser={...fresh};
+        // Update session dengan data terbaru
+        localStorage.setItem(AUTH_KEY,JSON.stringify(currentUser));
+      }else{
+        // User sudah dihapus — paksa logout
+        localStorage.removeItem(AUTH_KEY);
+        return;
+      }
+      showApp();
+    }
+  }catch(e){
+    console.warn('Session invalid, reset:',e.message);
+    localStorage.removeItem(AUTH_KEY);
+  }
+})();
+</script>
