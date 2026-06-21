@@ -277,7 +277,7 @@ function buildSidebar(){
 
   // Sistem
   html+='<div class="nav-divider"></div><div class="nav-section">Sistem</div>';
-  html+=`<a class="nav-item" onclick="showPage('database')" href="#" id="nav-database"><span class="nav-icon">💾</span> Database</a>`;
+
   if(isOwner)
     html+=`<a class="nav-item" onclick="showPage('users')" href="#" id="nav-users"><span class="nav-icon">👥</span> Kelola Pengguna</a>`;
 
@@ -6411,14 +6411,15 @@ function renderPengaturanPage(main){
       </div>
     </div>
   </div>`;
-
+const tabBackup = renderDatabaseContent();
   // ── Render halaman ──────────────────────────────────────
-  const tabs=[
-    {id:'profil',  icon:'🏢', label:'Profil SPBU'},
-    {id:'produk',  icon:'⛽', label:'Produk BBM'},
-    {id:'users',   icon:'👥', label:'Kelola Pengguna'},
-    {id:'keamanan',icon:'🔐', label:'Keamanan'},
-  ];
+ const tabs=[
+  {id:'profil', icon:'🏢', label:'Profil SPBU'},
+  {id:'produk', icon:'⛽', label:'Produk BBM'},
+  {id:'users', icon:'👥', label:'Kelola Pengguna'},
+  {id:'keamanan', icon:'🔐', label:'Keamanan'},
+  {id:'backup', icon:'☁️', label:'Backup & Database'}
+];
 
   main.innerHTML=`
   <div class="page-header">
@@ -6438,8 +6439,15 @@ function renderPengaturanPage(main){
   </div>
 
   <!-- KONTEN TAB -->
-  ${pgTab==='profil'?tabProfil:pgTab==='produk'?renderTabProduk():pgTab==='users'?tabUsers:tabKeamanan}
-  `;
+${pgTab==='profil'
+ ? tabProfil
+ : pgTab==='produk'
+ ? renderTabProduk()
+ : pgTab==='users'
+ ? tabUsers
+ : pgTab==='keamanan'
+ ? tabKeamanan
+ : tabBackup}
 }
 
 // ── Aksi Profil ──────────────────────────────────────────
@@ -7843,9 +7851,7 @@ function setCloudStatus(status, msg){
   updateBackupStatus();
 }
 
-
-
-function renderDBPage(main){
+function renderDatabaseContent(){
   const dbSize=JSON.stringify(state).length;
   const dbSizeKb=(dbSize/1024).toFixed(1);
   const cloudUrl=getCloudUrl();
@@ -7864,8 +7870,8 @@ function renderDBPage(main){
 
   // Update status
   updateBackupStatus();
-  main.innerHTML=`
-  <div class="page-header">
+  return `
+<div class="page-header">
     <div class="page-title">💾 Database & Backup</div>
     <div class="page-sub">Kelola penyimpanan lokal dan sinkronisasi ke Google Sheets</div>
   </div>
@@ -8109,7 +8115,9 @@ function renderDBPage(main){
     <button class="btn btn-danger" onclick="if(confirm('HAPUS SEMUA DATA LOKAL? Data di cloud aman.')){state.savedData=[];dbSave();renderDBPage(e('main-content'));toast('Data lokal dihapus.')}">🗑 Hapus Data Lokal</button>
   </div>`;
 }
-
+function renderDBPage(main){
+  main.innerHTML = renderDatabaseContent();
+  
 function simpanUrlCloud(){
   const url=(document.getElementById('cloud-url-input')?.value||'').trim();
   if(!url){toast('⚠ URL tidak boleh kosong!');return;}
