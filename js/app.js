@@ -7870,13 +7870,42 @@ function renderDBPage(main){
     <div class="page-sub">Kelola penyimpanan lokal dan sinkronisasi ke Google Sheets</div>
   </div>
 
-  <!-- METRICS -->
-  <div class="g4">
-    <div class="metric"><div class="metric-label">Total Rekaman</div><div class="metric-value c-blue">${state.savedData.length}</div><div class="metric-sub">data hari</div></div>
-    <div class="metric"><div class="metric-label">Ukuran Lokal</div><div class="metric-value">${dbSizeKb} KB</div><div class="metric-sub">localStorage</div></div>
-    <div class="metric"><div class="metric-label">Mode</div><div class="metric-value" style="font-size:13px">${isCloud?'☁ Cloud+Lokal':'💾 Lokal Only'}</div></div>
-    ${cloudStatusHtml}
+ <!-- STATUS SISTEM -->
+<div class="g4">
+
+  <div class="metric">
+    <div class="metric-label">Data Tersimpan</div>
+    <div class="metric-value c-blue">${state.savedData.length}</div>
+    <div class="metric-sub">hari operasional</div>
   </div>
+
+  <div class="metric">
+    <div class="metric-label">Firebase</div>
+    <div class="metric-value c-green">
+      ${_fbOnline ? '🟢 Aktif' : '🔴 Offline'}
+    </div>
+    <div class="metric-sub">sinkronisasi realtime</div>
+  </div>
+
+  <div class="metric">
+    <div class="metric-label">Google Sheets</div>
+    <div class="metric-value">
+      ${localStorage.getItem(CLOUD_KEY) && localStorage.getItem(CLOUD_KEY)!=='firebase'
+        ? '🟢 Aktif'
+        : '⚪ Tidak Aktif'}
+    </div>
+    <div class="metric-sub">backup laporan</div>
+  </div>
+
+  <div class="metric">
+    <div class="metric-label">Status Sistem</div>
+    <div class="metric-value c-green">
+      ✓ Normal
+    </div>
+    <div class="metric-sub">siap digunakan</div>
+  </div>
+
+</div>
 
   <!-- KONEKSI PANEL -->
   <div class="card" style="margin-bottom:12px;border:2px solid var(--blue-light)">
