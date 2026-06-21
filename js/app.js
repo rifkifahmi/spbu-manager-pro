@@ -8004,98 +8004,33 @@ function renderDBPage(main){
     </div>
   </div>
 
-  <!-- CLOUD SETUP -->
-  <div class="card" style="border:2px solid ${isCloud?'var(--green-light)':'var(--amber-light)'}">
-    <div class="card-title" style="color:${isCloud?'var(--green)':'var(--amber)'}">
-      ☁ Koneksi Google Sheets (Cloud)
-      ${isCloud?'<span class="state-badge sb-saved">✓ Terhubung</span>':'<span class="state-badge sb-edit">Belum diatur</span>'}
-    </div>
-
-    ${isCloud?`
-    <div class="nt nt-s" style="margin-bottom:14px">✓ Aplikasi terhubung ke Google Sheets. Setiap simpan data akan otomatis tersinkron ke cloud.</div>
-    <div class="fg" style="margin-bottom:12px">
-      <label>URL Apps Script Aktif</label>
-      <div style="display:flex;gap:8px">
-        <input type="text" class="inp" id="cloud-url-input" value="${cloudUrl}" style="font-size:11px;font-family:monospace">
-        <button class="btn btn-ghost" onclick="document.getElementById('cloud-url-input').type==='password'?document.getElementById('cloud-url-input').type='text':document.getElementById('cloud-url-input').type='password'">👁</button>
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn btn-save" onclick="simpanUrlCloud()">💾 Update URL</button>
-      <button class="btn btn-primary" onclick="testCloud()">🔌 Test Koneksi</button>
-      <button class="btn btn-ghost" onclick="muatDariCloud()">☁ Muat dari Cloud</button>
-      <button class="btn btn-ghost" onclick="cloudSyncAll()">↑ Sync Semua ke Cloud</button>
-      <button class="btn btn-reset" onclick="hapusUrlCloud()">✕ Putus Koneksi</button>
-    </div>`:`
-    <div class="nt nt-w" style="margin-bottom:14px">
-      ⚠ Tanpa cloud sync, data hanya tersimpan di browser perangkat ini. Manager dan owner tidak bisa berbagi data secara real-time.
-    </div>
-    <div style="background:var(--surface2);border-radius:var(--radius);padding:14px;margin-bottom:14px;font-size:13px;line-height:1.8">
-      <strong>Langkah setup (lakukan sekali):</strong><br>
-      1. Buka <a href="https://script.google.com" target="_blank" style="color:var(--blue)">script.google.com</a> → New Project<br>
-      2. Paste kode Apps Script di bawah → Deploy sebagai Web App<br>
-      3. Pilih <em>"Execute as: Me"</em> dan <em>"Anyone"</em><br>
-      4. Copy URL deployment → paste di bawah
-    </div>
-    <details style="margin-bottom:14px">
-      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--blue);padding:8px 0">📋 Lihat Kode Apps Script (klik untuk buka)</summary>
-      <pre style="background:var(--text);color:#e8e8e8;padding:14px;border-radius:var(--radius);font-size:11px;overflow-x:auto;margin-top:8px;line-height:1.6">const SHEET_ID = 'ISI_ID_SPREADSHEET_KAMU';
-const SHEET_NAME = 'Data';
-
-function doPost(e) {
-  try {
-    const payload = JSON.parse(e.postData.contents);
-    if (payload.action === 'save') return saveData(payload.data);
-    if (payload.action === 'loadAll') return loadAll();
-    return respond({status:'error',msg:'Unknown action'});
-  } catch(err) {
-    return respond({status:'error',msg:err.message});
-  }
-}
-
-function doGet(e) { return loadAll(); }
-
-function saveData(data) {
-  const ss = SpreadsheetApp.openById(SHEET_ID);
-  let sheet = ss.getSheetByName(SHEET_NAME);
-  if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
-  const rows = sheet.getLastRow() > 0
-    ? sheet.getRange(1,1,sheet.getLastRow(),1).getValues() : [];
-  let found = -1;
-  for (let i = 0; i &lt; rows.length; i++) {
-    if (rows[i][0] === data.tanggal) { found = i+1; break; }
-  }
-  const row = [data.tanggal, JSON.stringify(data), new Date().toISOString()];
-  if (found > 0) sheet.getRange(found,1,1,3).setValues([row]);
-  else sheet.appendRow(row);
-  if (sheet.getLastRow() > 1)
-    sheet.getRange(1,1,sheet.getLastRow(),3).sort({column:1,ascending:false});
-  return respond({status:'ok',tanggal:data.tanggal});
-}
-
-function loadAll() {
-  const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sheet = ss.getSheetByName(SHEET_NAME);
-  if (!sheet || sheet.getLastRow() === 0) return respond({status:'ok',data:[]});
-  const rows = sheet.getDataRange().getValues();
-  const data = rows.map(r => { try{return JSON.parse(r[1]);}catch(e){return null;} }).filter(Boolean);
-  return respond({status:'ok',data});
-}
-
-function respond(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
-}</pre>
-    </details>
-    <div class="fg" style="margin-bottom:12px">
-      <label>URL Apps Script (setelah deploy)</label>
-      <input type="text" class="inp" id="cloud-url-input" placeholder="https://script.google.com/macros/s/xxxxx/exec">
-    </div>
-    <div style="display:flex;gap:8px">
-      <button class="btn btn-save" onclick="simpanUrlCloud()">💾 Simpan & Aktifkan</button>
-      <button class="btn btn-ghost" onclick="testCloud()">🔌 Test Koneksi</button>
-    </div>`}
+<!-- CLOUD BACKUP -->
+<div class="card">
+  <div class="card-title">
+    ☁ Cloud Backup Firebase
   </div>
+
+  <div class="nt nt-s" style="margin-bottom:15px">
+    ✓ Firebase Realtime Database aktif dan digunakan sebagai penyimpanan utama.
+  </div>
+
+  <div style="display:flex;gap:10px;flex-wrap:wrap">
+
+    <button class="btn btn-primary" onclick="testCloud()">
+      🔌 Test Koneksi
+    </button>
+
+    <button class="btn btn-save" onclick="fbSyncAll()">
+      ☁ Sinkronkan Semua Data
+    </button>
+
+  </div>
+
+  <div style="margin-top:15px;font-size:12px;color:var(--text2)">
+    Data owner dan manager tersimpan otomatis di Firebase dan dapat diakses dari perangkat lain.
+  </div>
+</div>
+
 
   <!-- STATUS REALTIME -->
   <div class="card" id="cloud-status-card" style="display:${isCloud?'block':'none'}">
