@@ -6485,7 +6485,7 @@ function pgDeleteUser(id){
   const users=getUsers();
   const u=users.find(x=>x.id===id);
   if(!u||u.role==='owner'){toast('⚠ Tidak bisa menghapus akun Owner!');return;}
-  if(!confirm(`Hapus pengguna "${u.name}"? Tindakan ini tidak bisa dibatalkan.`))return;
+  if(!confirm(`Hapus pengguna"${u.name}"? Tindakan ini tidak bisa dibatalkan.`))return;
   saveUsers(users.filter(x=>x.id!==id));
   toast('✓ Pengguna dihapus.');
   window._pgEditUserId=null;
